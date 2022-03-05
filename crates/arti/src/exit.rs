@@ -1,6 +1,6 @@
 //! Detect a "ctrl-c" notification or other reason to exit.
 
-use crate::Result;
+use anyhow::Result;
 
 /// Wait until a control-c notification is received, using an appropriate
 /// runtime mechanism.
