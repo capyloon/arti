@@ -11,7 +11,7 @@ categories = [ "network-programming", "cryptography" ]
 repository="https://gitlab.torproject.org/tpo/core/arti.git/"
 
 [features]
-default = [ "native-tls" ]
+default = [ "rustls" ]
 native-tls = [ "arti-client/native-tls", "tor-rtcompat/native-tls" ]
 rustls = [ "arti-client/rustls", "tor-rtcompat/rustls" ]
 static = [ "arti-client/static" ]
