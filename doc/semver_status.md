@@ -16,53 +16,13 @@ Don't document other changes in this file.
 
 We can delete older sections here after we bump the releases.
 
+## Since Arti 0.2.0
 
-## Since Arti 0.1.0
+### tor-socksproto
 
-arti-client, arti-config, tor-circmgr, tor-dirmgr:
+BREAKING: Removed some unused accessors.
 
-  Drop conversion from FooConfig to FooConfigBuilder for many Foo.
-  Further change in this area is expected.
+### tor-rtmock
 
-  Drop impl Deserialize for ArtiConfig.
+MODIFIED: Added add_blackhole to MockNetwork.
 
-arti-client:
-
-  Replace ArtiClientBuilder's methods for individual elements of TorClientConfigBuilder
-  with an accessor `.tor()` to get `&mut TorClientConfigBuilder`.
-
-arti:
-
-  Provide library crate with unstable API.
-
-tor-llcrypto:
-
-  new-api: Added RsaIdentity::from\_hex().
-
-arti-client:
-
-  api-break (experimental only): changed circmgr() and dirmgr() to return
-  &Arc, not Arc.
-
-tor-dirmgr:
-  new-api: DirMgrConfig object now has accessors.
-
-
-tor-netdoc:
-
-  new-api (experimental only): Can modify the set of relays in an unverified
-  consensus.
-
-  api-break: changed the return type of GenericRouterStatus::version()
-
-tor-protover:
-  new-api: Protocols now implements Eq, PartialEq, and Hash.
-
-tor-basic-utils:
-
-  Remove `humantime_serde_option` module.
-  (Use `humantime_serde::option` instead.)
-
-tor-rtcompt:
-
-  api-break: Runtime require an additional supertrait UdpProvider

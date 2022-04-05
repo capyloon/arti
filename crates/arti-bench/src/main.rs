@@ -36,8 +36,8 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::{anyhow, Result};
+use arti::cfg::ArtiConfig;
 use arti_client::{IsolationToken, TorAddr, TorClient, TorClientConfig};
-use arti_config::ArtiConfig;
 use clap::{App, Arg};
 use futures::StreamExt;
 use rand::distributions::Standard;
@@ -238,7 +238,7 @@ async fn client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let read = socket.read(&mut received).await?;
     if read == 0 {
-        anyhow!("unexpected EOF");
+        return Err(anyhow!("unexpected EOF"));
     }
     let first_byte_ts = SystemTime::now();
     socket.read_exact(&mut received[read..]).await?;
@@ -684,7 +684,7 @@ impl<R: Runtime> Benchmark<R> {
 
         self.run(BenchmarkType::Arti, |run| {
             let mut prefs = arti_client::StreamPrefs::new();
-            prefs.set_isolation_group(iso.next_in(run));
+            prefs.set_isolation(iso.next_in(run));
 
             tor_client.connect(addr.clone())
         })
