@@ -80,13 +80,15 @@
 #![allow(clippy::print_stdout)] // Allowed in this crate only.
 
 mod config;
+mod dirfilter;
 mod rt;
 mod traces;
 
+use arti::ArtiConfig;
 use arti_client::TorClient;
-use arti_config::ArtiConfig;
 use futures::task::SpawnExt;
 use rt::badtcp::BrokenTcpProvider;
+use tor_dirmgr::filter::DirFilter;
 use tor_rtcompat::{PreferredRuntime, Runtime, SleepProviderExt};
 
 use anyhow::{anyhow, Result};
@@ -201,6 +203,9 @@ struct Job {
     /// Describes how (if at all) to break the TCP connections.
     tcp_breakage: TcpBreakage,
 
+    /// Describes how (if at all) to mess with directories.
+    dir_filter: Arc<dyn DirFilter + 'static>,
+
     /// The tracing configuration for our console log.
     console_log: String,
 
@@ -220,6 +225,7 @@ impl Job {
         let config: ArtiConfig = self.config.load()?.try_into()?;
         let client = TorClient::with_runtime(runtime)
             .config(config.tor_client_config()?)
+            .dirfilter(self.dir_filter.clone())
             .create_unbootstrapped()?;
         Ok(client)
     }
