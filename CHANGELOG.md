@@ -4,6 +4,130 @@ This file describes changes in Arti through the current release.  Once Arti
 is more mature, and we start to version crates independently, we may
 switch to using a separate changelog for each crate.
 
+# Arti 0.3.0 — 6 May 2022
+
+Arti 0.3.0 includes several new features, including an improved
+configuration builder API, improved detection and tolerance
+of numerous network failure types, and several important bugfixes.
+
+There are significant breaking changes in this release; please see
+below.
+
+### Breaking changes
+
+Here are the main breaking changes visible from the arti-client crate.
+Numerous other lower-level crates have breaking changes not noted here.
+
+- We now require Rust 1.56 or later. This change enables us to use more
+  recent versions of several of our dependencies, including a
+  significantly faster `aes`.  ([!472])
+- Some unused accessors have been removed from
+  `tor-socksproto`. ([3103549cba603173])
+- Our configuration logic and APIs have been significantly revised.
+  Major changes are described below.  We expect that we're mostly
+  done with breaking changes in this area, though we expect a few
+  minor API breaks here in the next release.
+  - Lists of objects, and contained configuration objects, are
+    now constructed using a uniform pattern.
+  - All of our config _builder_ types are now `Deserialize`; our
+    configuration types themselves are not.
+  - Various types are now more consistently constructed, which breaks
+    some of the APIs.
+  - Paths can now be given as "literal" paths, which will not be
+    expanded.
+  - Several options have been renamed for consistency.
+  - For background see [#451], [!447], [!462], [!471], [!473], [!474],
+    [!475], [!477], [!478], [!481], and [!487].
+
+### New features
+
+- Arti now tracks clock skew reports from the guard relays and
+  fallback directories that we contact, and uses this information to
+  infer whether our clock is actually skewed, and whether this skew is
+  the likely cause of a failure to bootstrap. ([!450], [!455])
+- We now remove obsolete files from our state directory. ([#282])
+- More objects from `tor-dirmgr` are now exposed when the
+  `experimental-api` feature is enabled. ([!463])
+- Arti now has a feature to avoid logging certain sensitive information to
+  persistent logs at level `info` or higher.  When safe logging is
+  enabled (which it is, by default), the string `[scrubbed]` is printed
+  in these contexts, rather than the sensitive information.
+  At present, only target addresses are considered sensitive, though
+  we aim to protect more information moving forward.  This feature can
+  be disabled with the configuration option
+  `storage.log_sensitive_information`.  ([#189], [!485])
+
+### Major bugfixes
+
+- Our circuit-build logic is now much more careful about which errors are
+  retriable, and how long to wait between attempts. ([#421], [!443])
+- We resolved a race condition that could cause internal errors to be
+  reported erroneously during circuit construction. ([#427])
+- We no longer interpret a successful circuit as meaning that a
+  guard is working _as a directory_.  Even if it can build circuits, it
+  may be unable to answer directory requests to our satisfaction.
+  ([b3e06b93b6a34922])
+
+### Infrastructure
+
+- Our CI infrastructure now correctly detects (and reports!) failures
+  from cargo-audit.  ([!452])
+
+### Cleanups, minor features, and minor bugfixes
+
+- We report more accurate and useful messages on failure to build a
+  circuit. ([f7810d42eb953bf5])
+- Avoid dropping information when reloading guards. ([#429])
+- Arti now treats expired or not-yet-valid directory objects as an error
+  condition, since they indicate that the directory cache (or the
+  client) likely has a skewed clock. ([#431])
+- We now back off on attempts to build preemptive circuits, if we find
+  that those attempts are failing.  ([#437], [!456])
+- As part of the configuration refactoring, we've extended the amount of
+  our configuration builders that are auto-generated. ([!462])
+- Improve handling of some integer overflows. ([!466])
+- More unit tests throughout the code.
+
+### Acknowledgments
+
+Thanks to everybody who has contributed to this release, including
+Christian Grigis, Dimitris Apostolou, Samanta Navarro, and
+Trinity Pointard.
+
+[!443]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/443
+[!447]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/447
+[!450]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/450
+[!452]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/452
+[!455]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/455
+[!456]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/456
+[!462]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/462
+[!463]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/463
+[!466]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/466
+[!471]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/471
+[!472]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/472
+[!473]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/473
+[!474]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/474
+[!475]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/475
+[!477]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/477
+[!478]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/478
+[!481]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/481
+[!485]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/485
+[!487]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/487
+[#189]: https://gitlab.torproject.org/tpo/core/arti/-/issues/189
+[#282]: https://gitlab.torproject.org/tpo/core/arti/-/issues/282
+[#421]: https://gitlab.torproject.org/tpo/core/arti/-/issues/421
+[#427]: https://gitlab.torproject.org/tpo/core/arti/-/issues/427
+[#429]: https://gitlab.torproject.org/tpo/core/arti/-/issues/429
+[#431]: https://gitlab.torproject.org/tpo/core/arti/-/issues/431
+[#437]: https://gitlab.torproject.org/tpo/core/arti/-/issues/437
+[#451]: https://gitlab.torproject.org/tpo/core/arti/-/issues/451
+[3103549cba603173]: https://gitlab.torproject.org/tpo/core/arti/-/commit/3103549cba603173a5dc0aefa8f9c201d3d1a6e5
+[b3e06b93b6a34922]: https://gitlab.torproject.org/tpo/core/arti/-/commit/b3e06b93b6a34922cd8d07f13aa8f265ae7e8af3
+[f7810d42eb953bf5]: https://gitlab.torproject.org/tpo/core/arti/-/commit/f7810d42eb953bf57d9d777fc823087211350452
+
+
+
+
 
 # Arti 0.2.0 — 1 Apr 2022
 

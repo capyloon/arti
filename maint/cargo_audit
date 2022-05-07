@@ -2,6 +2,8 @@
 #
 # Run "cargo audit" with an appropriate set of flags.
 
+set -euo pipefail
+
 # List of vulnerabilities to ignore.  It's risky to do this, so we should
 # only do this when two circumstances hold:
 #   1. The vulnerability doesn't affect us.
@@ -11,12 +13,21 @@
 # If you add anything to this section, make sure to add a comment
 # explaining why it's safe to do so.
 IGNORE=(
+    # This is not a vulnerability but an unmaintained warn for the
+    # `net2` crate. It's pulled indirectly by `notify` 4.0. It's
+    # fixed in `notify` 5.0 however only pre-releases are available
+    # for now.
+    --ignore RUSTSEC-2020-0016
 )
 
 cargo audit -D warnings "${IGNORE[@]}"
 
 
 OBSOLETE_IGNORE=(
+    # This is not a vulnerability but an unmaintained warn for the
+    # `tempdir` crate. It was pulled by `tls-api` 0.7.0. `tls-api`
+    # 0.8.0 switched to tempfile instead.
+    --ignore RUSTSEC-2018-0017
     # This is a vulnerability in the `nix` crate caused by an
     # out-of-bounds write in `getgrouplist`.  We got our `nix`
     # dependency via `async-ctrlc`, which uses `ctrlc`, which uses

@@ -4,13 +4,15 @@
 # earliest version listed in our Cargo.toml files.  (And then
 # re-upgrades a few second-order dependencies that aren't actually
 # supported by our first-order dependencies in their oldest versions.)
+#
+# The purpose of this script is to make sure that we are actually
+# compatible with the versions listed in our Cargo.toml files.
+# Without testing this, we could wind up with code that built
+# successfully with the versions listed in Cargo.lock, while declaring
+# support for versions of our dependencies that won't actually work.
 
 cargo +nightly update -Z minimal-versions
 cargo update \
-      -p darling:0.12.0 \
       -p crc32fast \
-      -p quote:0.6.3 \
       -p zeroize_derive:1.1.1 \
-      -p env_logger:0.5.0 \
-      -p synstructure:0.12.0 \
-      -p nix:0.4.2
+      -p env_logger:0.5.0
