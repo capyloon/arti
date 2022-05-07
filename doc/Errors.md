@@ -16,7 +16,7 @@ The ErrorKind enum contains a number of possible error types.  Each is designed 
 
 There is additionally an unstable way to get more detailed information from an arti_client::Error.  If you have enabled the "error-details" feature, you can call a detail() method, to access an inner ErrorDetail enum with a more specific breakdown of where the error occurred, how, and why.
 
-Using the "error-details" feature breaks your semver guarantees on the arti-client crate.  If you ever need to do so, then possible one of us is mistaken: maybe we have made a mistake in designing Error or ErrorKind, or maybe there is a better way to do what you're trying to achieve.  Please get in touch so that we can help figure out the best solution.
+Using the "error-details" feature breaks your semver guarantees on the arti-client crate.  If you ever need to do so, then possibly one of us is mistaken: maybe we have made a mistake in designing Error or ErrorKind, or maybe there is a better way to do what you're trying to achieve.  Please get in touch so that we can help figure out the best solution.
 
 We are making the arti_client::Error type opaque so that we have freedom to radically refactor ErrorDetail, as well as the Error types from other crates.  We are exposing it behind a feature because we recognize that we will inevitably make some mistakes in our designs, and it's important to allow escape hatches for users with tricky needs.
 
@@ -28,7 +28,7 @@ Everywhere else besides arti_error::Error, we try to make our error types follow
  * All should implement Clone, Display, Error, Debug, Send, Sync, 'static.
  * When we wrap an inner error, we always include context information describing what was happening when the inner error occurred.  This means that we should usually not `impl From<TheirInner> for MyError`.
  * Whenever appropriate, we have a `pub fn kind(&self) -> ErrorKind` function.
- * When a  public function can fail for a number of reasons that are much more limited than the crate's entire Error type, we should consider give that function its own Error type.
+ * When a public function can fail for a number of reasons that are much more limited than the crate's entire Error type, we should consider giving that function its own Error type.
  * We use `Box<>` as needed to keep the size of the enumeration fairly small.
  * We allow more instability in these types than we allow in arti_client: these types should be inaccessible from the arti_client when "error-details" is not enabled.
 
@@ -84,7 +84,7 @@ enum ErrorDetail {
 }
 
 #[cfg(feature("error-details"))]
-pub use ErrorDetail; //This becomes public only if we have 
+pub use ErrorDetail; // This becomes public only if we have
 
 impl std::error::Error for ErrorDetail { ... }
 
@@ -151,7 +151,7 @@ We _do_ expose the entire error enumeration from these crates.  That means we mi
 
 **TODO**: should be documented somewhere! perhaps more generally ("tor-* crates are more unstable")
 
-#### Who is responsible for putting calling parameters into the error ?
+#### Who is responsible for putting calling parameters into the error?
 
 Eg, tor-chanmgr has this:
 
@@ -175,7 +175,7 @@ For example, when tor-circmgr calls `build_channel`, it is tor-circmgr which is 
 
 #### Describing the error type
 
-When a problem is reported, different error types should generally produce different messages.  Where should this be done ?
+When a problem is reported, different error types should generally produce different messages.  Where should this be done?
 
 Answer: the place where the type is embedded.  For example:
 

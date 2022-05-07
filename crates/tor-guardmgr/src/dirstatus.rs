@@ -1,15 +1,16 @@
-//! Types and code to track the readiness status of a fallback directory.
+//! Types and code to track the readiness status of a directory cache.
 
 use std::time::{Duration, Instant};
 use tor_basic_utils::retry::RetryDelay;
 
-/// Status information about whether a [`FallbackDir`](super::FallbackDir) is
-/// currently usable.
+/// Status information about whether a
+/// [`FallbackDir`](crate::fallback::FallbackDir) or
+/// [`Guard`](crate::guard::Guard) is currently usable as a directory cache.
 ///
-/// This structure is used to track whether the fallback cache has recently
-/// failed, and if so, when it can be retried.
+/// This structure is used to track whether the cache has recently failed, and
+/// if so, when it can be retried.
 #[derive(Debug, Clone)]
-pub(crate) struct Status {
+pub(crate) struct DirStatus {
     /// Used to decide how long to delay before retrying a fallback cache
     /// that has failed.
     delay: RetryDelay,
@@ -19,21 +20,16 @@ pub(crate) struct Status {
     retry_at: Option<Instant>,
 }
 
-/// Least amount of time we'll wait before retrying a fallback cache.
-//
-// TODO: we may want to make this configurable to a smaller value for chutney networks.
-const FALLBACK_RETRY_FLOOR: Duration = Duration::from_secs(150);
-
-impl Default for Status {
-    fn default() -> Self {
-        Status {
-            delay: RetryDelay::from_duration(FALLBACK_RETRY_FLOOR),
+impl DirStatus {
+    /// Construct a new DirStatus object with a given lower-bound for delays
+    /// after failure.
+    pub(crate) fn new(delay_floor: Duration) -> Self {
+        DirStatus {
+            delay: RetryDelay::from_duration(delay_floor),
             retry_at: None,
         }
     }
-}
 
-impl Status {
     /// Return true if this `Status` is usable at the time `now`.
     pub(crate) fn usable_at(&self, now: Instant) -> bool {
         match self.retry_at {
@@ -56,7 +52,7 @@ impl Status {
     /// directory.
     pub(crate) fn note_success(&mut self) {
         self.retry_at = None;
-        self.delay = RetryDelay::from_duration(FALLBACK_RETRY_FLOOR);
+        self.delay.reset();
     }
 
     /// Record that the associated fallback directory has failed.
@@ -75,28 +71,31 @@ mod test {
     fn status_basics() {
         let now = Instant::now();
 
-        let mut status = Status::default();
+        /// floor to use for testing.
+        const FLOOR: Duration = Duration::from_secs(99);
+
+        let mut status = DirStatus::new(FLOOR);
         // newly created status is usable.
         assert!(status.usable_at(now));
 
         // no longer usable after a failure.
         status.note_failure(now);
-        assert_eq!(status.next_retriable().unwrap(), now + FALLBACK_RETRY_FLOOR);
+        assert_eq!(status.next_retriable().unwrap(), now + FLOOR);
         assert!(!status.usable_at(now));
 
         // Not enough time has passed.
-        assert!(!status.usable_at(now + FALLBACK_RETRY_FLOOR / 2));
+        assert!(!status.usable_at(now + FLOOR / 2));
 
         // Enough time has passed.
-        assert!(status.usable_at(now + FALLBACK_RETRY_FLOOR));
+        assert!(status.usable_at(now + FLOOR));
 
         // Mark as failed again; the timeout will (probably) be longer.
-        status.note_failure(now + FALLBACK_RETRY_FLOOR);
-        assert!(status.next_retriable().unwrap() >= now + FALLBACK_RETRY_FLOOR * 2);
-        assert!(!status.usable_at(now + FALLBACK_RETRY_FLOOR));
+        status.note_failure(now + FLOOR);
+        assert!(status.next_retriable().unwrap() >= now + FLOOR * 2);
+        assert!(!status.usable_at(now + FLOOR));
 
         // Mark as succeeded; it should be usable immediately.
         status.note_success();
-        assert!(status.usable_at(now + FALLBACK_RETRY_FLOOR));
+        assert!(status.usable_at(now + FLOOR));
     }
 }

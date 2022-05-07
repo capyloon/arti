@@ -3,11 +3,13 @@
 # Here we declare that this is a workspace, containing several crates
 # within it.
 #
-# Please keep this list toplogically sorted by dependency relation, so
+# Please keep this list topologically sorted by dependency relation, so
 # that every crate appears _before_ any other crate that depends on it.
 members = [
     "crates/tor-basic-utils",
     "crates/caret",
+    "crates/fs-mistrust",
+    "crates/safelog",
     "crates/retry-error",
     "crates/tor-error",
     "crates/tor-config",
@@ -48,7 +50,7 @@ resolver = "2"
 # (Assuming xz compression on the binary.)
 #
 # The biggest win is to run `strip --strip-debug` on the binary after
-# generating it, to through out debugging symbols that we inherited from
+# generating it, to throw out debugging symbols that we inherited from
 # other libraries.  Don't do `strip --strip-unused`, though, or you'll
 # break backtraces.  That saves about 21% download size.
 
@@ -61,7 +63,3 @@ codegen-units = 1
 # Optimize for size.  [Actually this is even smaller than 'z' on rust
 # 1.56.  It saves about 11% download size over the default value of '3'.]
 opt-level = 's'
-
-#[patch.crates-io.derive_builder_core]
-#git = "https://github.com/ijackson/rust-derive-builder"
-#rev = "dccbbb8ad75717c8bc0070b6f0364b2c3a54abb7"
