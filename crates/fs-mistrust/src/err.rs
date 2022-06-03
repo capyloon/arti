@@ -17,10 +17,11 @@ pub enum Error {
     ///
     /// Only generated on unix-like systems.
     ///
-    /// The provided integer contains the `st_mode` bits which were incorrectly
-    /// set.
-    #[error("Incorrect permissions on file or directory {0}:  {}", format_access_bits(* .1))]
-    BadPermission(PathBuf, u32),
+    /// The first integer contains the current permission bits, and the second
+    /// contains the permission bits which were incorrectly set.
+    #[error("Incorrect permissions: {0} is {}; must be {}",
+            format_access_bits(* .1, '='), format_access_bits(* .2, '-'))]
+    BadPermission(PathBuf, u32, u32),
 
     /// A target  (or one of its ancestors) had an untrusted owner.
     ///
@@ -83,19 +84,49 @@ pub enum Error {
     #[error("Unable to list directory")]
     Listing(#[source] Arc<walkdir::Error>),
 
-    /// We were unable to open a file with [`CheckedDir::open`](crate::CheckedDir::open)
-
     /// Tried to use an invalid path with a [`CheckedDir`](crate::CheckedDir),
     #[error("Path was not valid for use with CheckedDir.")]
     InvalidSubdirectory,
+
+    /// We encountered an error while attempting an IO operation on a file.
+    #[error("IO error on {0}")]
+    Io(PathBuf, #[source] Arc<IoError>),
+
+    /// We could not create an unused temporary path when trying to write a
+    /// file.
+    #[error("Could not name temporary file for {0}")]
+    NoTempFile(PathBuf),
+
+    /// A field was missing when we tried to construct a
+    /// [`Mistrust`](crate::Mistrust).
+    #[error("Missing field: {0}")]
+    MissingField(#[from] derive_builder::UninitializedFieldError),
+
+    /// A  group that we were configured to trust could not be found.
+    #[error("No such group: {0}")]
+    NoSuchGroup(String),
+
+    /// A user that we were configured to trust could not be found.
+    #[error("No such user: {0}")]
+    NoSuchUser(String),
 }
 
 impl Error {
-    /// Create an error from an IoError object.
+    /// Create an error from an IoError encountered while inspecting permissions
+    /// on an object.
     pub(crate) fn inspecting(err: IoError, fname: impl Into<PathBuf>) -> Self {
         match err.kind() {
             IoErrorKind::NotFound => Error::NotFound(fname.into()),
             _ => Error::CouldNotInspect(fname.into(), Arc::new(err)),
+        }
+    }
+
+    /// Create an error from an IoError encountered while performing IO (open,
+    /// read, write) on an object.
+    pub(crate) fn io(err: IoError, fname: impl Into<PathBuf>) -> Self {
+        match err.kind() {
+            IoErrorKind::NotFound => Error::NotFound(fname.into()),
+            _ => Error::Io(fname.into(), Arc::new(err)),
         }
     }
 
@@ -104,10 +135,12 @@ impl Error {
         Some(
             match self {
                 Error::NotFound(pb) => pb,
-                Error::BadPermission(pb, _) => pb,
+                Error::BadPermission(pb, ..) => pb,
                 Error::BadOwner(pb, _) => pb,
                 Error::BadType(pb) => pb,
                 Error::CouldNotInspect(pb, _) => pb,
+                Error::Io(pb, _) => pb,
+                Error::NoTempFile(pb) => pb,
                 Error::Multiple(_) => return None,
                 Error::StepsExceeded => return None,
                 Error::CurrentDirectory(_) => return None,
@@ -115,9 +148,39 @@ impl Error {
                 Error::InvalidSubdirectory => return None,
                 Error::Content(e) => return e.path(),
                 Error::Listing(e) => return e.path(),
+                Error::MissingField(_) => return None,
+                Error::NoSuchGroup(_) => return None,
+                Error::NoSuchUser(_) => return None,
             }
             .as_path(),
         )
+    }
+
+    /// Return true iff this error indicates a problem with filesystem
+    /// permissions.
+    ///
+    /// (Other errors typically indicate an IO problem, possibly one preventing
+    /// us from looking at permissions in the first place)
+    pub fn is_bad_permission(&self) -> bool {
+        match self {
+            Error::BadPermission(..) | Error::BadOwner(_, _) | Error::BadType(_) => true,
+
+            Error::NotFound(_)
+            | Error::CouldNotInspect(_, _)
+            | Error::StepsExceeded
+            | Error::CurrentDirectory(_)
+            | Error::CreatingDir(_)
+            | Error::Listing(_)
+            | Error::InvalidSubdirectory
+            | Error::Io(_, _)
+            | Error::NoTempFile(_)
+            | Error::MissingField(_)
+            | Error::NoSuchGroup(_)
+            | Error::NoSuchUser(_) => false,
+
+            Error::Multiple(errs) => errs.iter().any(|e| e.is_bad_permission()),
+            Error::Content(err) => err.is_bad_permission(),
+        }
     }
 
     /// Return an iterator over all of the errors contained in this Error.
@@ -157,21 +220,22 @@ impl std::iter::FromIterator<Error> for Option<Error> {
 }
 
 /// Convert the low 9 bits of `bits` into a unix-style string describing its
-/// access permission.
+/// access permission. Insert `c` between the ugo and perm.
 ///
-/// For example, 0o022 becomes 'g+w o+w'.
+/// For example, 0o022, '+' becomes 'g+w,o+w'.
 ///
 /// Used for generating error messages.
-fn format_access_bits(bits: u32) -> String {
+fn format_access_bits(bits: u32, c: char) -> String {
     let mut s = String::new();
 
-    for (shift, prefix) in [(6, "u="), (3, "g="), (0, "o=")] {
+    for (shift, prefix) in [(6, 'u'), (3, 'g'), (0, 'o')] {
         let b = (bits >> shift) & 7;
         if b != 0 {
             if !s.is_empty() {
-                s.push(' ');
+                s.push(',');
             }
-            s.push_str(prefix);
+            s.push(prefix);
+            s.push(c);
             for (bit, ch) in [(4, 'r'), (2, 'w'), (1, 'x')] {
                 if b & bit != 0 {
                     s.push(ch);
@@ -189,10 +253,18 @@ mod test {
 
     #[test]
     fn bits() {
-        assert_eq!(format_access_bits(0o777), "u=rwx g=rwx o=rwx");
-        assert_eq!(format_access_bits(0o022), "g=w o=w");
-        assert_eq!(format_access_bits(0o022), "g=w o=w");
-        assert_eq!(format_access_bits(0o020), "g=w");
-        assert_eq!(format_access_bits(0), "");
+        assert_eq!(format_access_bits(0o777, '='), "u=rwx,g=rwx,o=rwx");
+        assert_eq!(format_access_bits(0o022, '='), "g=w,o=w");
+        assert_eq!(format_access_bits(0o022, '-'), "g-w,o-w");
+        assert_eq!(format_access_bits(0o020, '-'), "g-w");
+        assert_eq!(format_access_bits(0, ' '), "");
+    }
+
+    #[test]
+    fn bad_perms() {
+        assert_eq!(
+            Error::BadPermission(PathBuf::from("/path"), 0o777, 0o022).to_string(),
+            "Incorrect permissions: /path is u=rwx,g=rwx,o=rwx; must be g-w,o-w"
+        );
     }
 }

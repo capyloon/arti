@@ -3,6 +3,7 @@
 //! This works by establishing a simple TCP server, and having Arti connect back to it via
 //! a `chutney` network of Tor nodes, benchmarking the upload and download bandwidth while doing so.
 
+// @@ begin lint list maintained by maint/add_warning @@
 #![deny(missing_docs)]
 #![warn(noop_method_call)]
 #![deny(unreachable_pub)]
@@ -31,12 +32,15 @@
 #![warn(clippy::trait_duplication_in_bounds)]
 #![deny(clippy::unnecessary_wraps)]
 #![warn(clippy::unseparated_literal_suffix)]
+#![deny(clippy::unwrap_used)]
+#![allow(clippy::let_unit_value)] // This can reasonably be done for explicitness
+//! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 // This file uses `unwrap()` a fair deal, but this is fine in test/bench code
 // because it's OK if tests and benchmarks simply crash if things go wrong.
 #![allow(clippy::unwrap_used)]
 
 use anyhow::{anyhow, Result};
-use arti::cfg::ArtiConfig;
+use arti::cfg::ArtiCombinedConfig;
 use arti_client::{IsolationToken, TorAddr, TorClient, TorClientConfig};
 use clap::{App, Arg};
 use futures::StreamExt;
@@ -56,6 +60,7 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_socks::tcp::Socks5Stream;
+use tor_config::ConfigurationSources;
 use tor_rtcompat::Runtime;
 use tracing::info;
 
@@ -354,14 +359,19 @@ fn main() -> Result<()> {
         )
         .get_matches();
     info!("Parsing Arti configuration...");
-    let mut config_sources = arti_config::ConfigurationSources::new();
+    let mut config_sources = ConfigurationSources::new_empty();
     matches
         .values_of_os("arti-config")
         .unwrap_or_default()
         .for_each(|f| config_sources.push_file(f));
+
+    // TODO really we ought to get this from the arti configuration, or something.
+    // But this is OK for now since we are a benchmarking tool.
+    let mistrust = fs_mistrust::Mistrust::new_dangerously_trust_everyone();
+    config_sources.set_mistrust(mistrust);
+
     let cfg = config_sources.load()?;
-    let config: ArtiConfig = cfg.try_into()?;
-    let tcc = config.tor_client_config()?;
+    let (_config, tcc) = tor_config::resolve::<ArtiCombinedConfig>(cfg)?;
     info!("Binding local TCP listener...");
     let listener = TcpListener::bind("0.0.0.0:0")?;
     let local_addr = listener.local_addr()?;

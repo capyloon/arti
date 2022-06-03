@@ -42,7 +42,7 @@ impl<'a> super::Verifier<'a> {
     // to the code.  It's not urgent, since the allocations won't cost much
     // compared to the filesystem access.
     pub(crate) fn check_errors(&self, path: &Path) -> impl Iterator<Item = Error> + '_ {
-        if self.mistrust.disable_ownership_and_permission_checks {
+        if self.mistrust.dangerously_trust_everyone {
             // We don't want to walk the path in this case at all: we'll just
             // look at the last element.
 
@@ -88,7 +88,7 @@ impl<'a> super::Verifier<'a> {
     pub(crate) fn check_content_errors(&self, path: &Path) -> impl Iterator<Item = Error> + '_ {
         use std::sync::Arc;
 
-        if !self.check_contents || self.mistrust.disable_ownership_and_permission_checks {
+        if !self.check_contents || self.mistrust.dangerously_trust_everyone {
             return boxed(std::iter::empty());
         }
 
@@ -179,21 +179,32 @@ impl<'a> super::Verifier<'a> {
         // about a directory, the owner cah change the permissions and owner
         // of anything in the directory.)
         let uid = meta.uid();
-        if uid != 0 && Some(uid) != self.mistrust.trust_uid {
+        if uid != 0 && Some(uid) != self.mistrust.trust_user {
             errors.push(Error::BadOwner(path.into(), uid));
         }
-        let mut forbidden_bits = if !self.readable_okay
-            && (path_type == PathType::Final || path_type == PathType::Content)
-        {
-            // If this is the target or a content object, and it must not be
-            // readable, then we forbid it to be group-rwx and all-rwx.
+
+        // On Unix-like platforms, symlink permissions are ignored (and usually
+        // not settable). Theoretically, the symlink owner shouldn't matter, but
+        // it's less confusing to consistently require the right owner.
+        if path_type == PathType::Symlink {
+            return;
+        }
+
+        let mut forbidden_bits = if !self.readable_okay && path_type == PathType::Final {
+            // If this is the target object, and it must not be readable, then
+            // we forbid it to be group-rwx and all-rwx.
+            //
+            // (We allow _content_ to be globally readable even if readable_okay
+            // is false, since we check that the Final directory is itself
+            // unreadable.  This is okay unless the content has hard links: see
+            // the Limitations section of the crate-level documentation.)
             0o077
         } else {
-            // If this is the target object and it may be readable, or if
-            // this is _any parent directory_, then we typically forbid the
-            // group-write and all-write bits.  (Those are the bits that
-            // would allow non-trusted users to change the object, or change
-            // things around in a directory.)
+            // If this is the target object and it may be readable, or if this
+            // is _any parent directory_ or any content, then we typically
+            // forbid the group-write and all-write bits.  (Those are the bits
+            // that would allow non-trusted users to change the object, or
+            // change things around in a directory.)
             if meta.is_dir() && meta.mode() & STICKY_BIT != 0 && path_type == PathType::Intermediate
             {
                 // This is an intermediate directory and this sticky bit is
@@ -208,12 +219,16 @@ impl<'a> super::Verifier<'a> {
             }
         };
         // If we trust the GID, then we allow even more bits to be set.
-        if self.mistrust.trust_gid == Some(meta.gid()) {
+        if self.mistrust.trust_group == Some(meta.gid()) {
             forbidden_bits &= !0o070;
         }
         let bad_bits = meta.mode() & forbidden_bits;
         if bad_bits != 0 {
-            errors.push(Error::BadPermission(path.into(), bad_bits));
+            errors.push(Error::BadPermission(
+                path.into(),
+                meta.mode() & 0o777,
+                bad_bits,
+            ));
         }
     }
 }

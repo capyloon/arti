@@ -7,6 +7,13 @@ stages:
 variables:
   # We don't need Husky to install the Git hooks for CI.
   CARGO_HUSKY_DONT_INSTALL_HOOKS: "true"
+  # fs-mistrust doesn't like umask 0
+  FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: "true"
+
+default:
+  before_script:
+    # gitlab fetch strategy doesn't reset permissions
+    - (while [ "$PWD" != / ]; do chmod go-w . && cd ..; done)
 
 check-editorconfig:
   stage: check
@@ -18,7 +25,7 @@ shellcheck:
   stage: check
   image: koalaman/shellcheck-alpine
   script:
-    - apk add git
+    - apk add git bash
     - ./maint/shellcheck_all
 
 rust-latest:
@@ -32,13 +39,21 @@ rust-latest:
     - rustup show
     - cargo clippy --all-features --all-targets -- -D warnings
     - cargo fmt -- --check
+    - cp cargo-license $CARGO_HOME/bin/ || cargo install cargo-license
+    - ./maint/check_licenses
     - cp cargo-audit $CARGO_HOME/bin/ || cargo install cargo-audit
     - ./maint/cargo_audit
     - cp $CARGO_HOME/bin/cargo-audit .
+    - cp cargo-sort $CARGO_HOME/bin/ || cargo install cargo-sort
+    - ./maint/cargo_sort
+    - cp $CARGO_HOME/bin/cargo-sort .
+    - ./maint/add_warning --check crates/*/src/{lib,main}.rs
     - cargo build --verbose --release -p arti-bench --target x86_64-unknown-linux-gnu
   cache:
     paths:
       - cargo-audit
+      - cargo-sort
+      - cargo-license
   artifacts:
     paths:
       - target/x86_64-unknown-linux-gnu/debug/arti
@@ -92,7 +107,9 @@ coverage:
       - grcov
   artifacts:
     reports:
-      cobertura: coverage.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
   tags:
     - amd64
 
@@ -115,6 +132,7 @@ build-repro:
   # If you upgrade this image, also change the one in docker_reproducible_build
   image: rust:1.59.0-alpine3.15
   script:
+    - apk add bash
     - ./maint/reproducible_build linux windows macos
   artifacts:
     paths:

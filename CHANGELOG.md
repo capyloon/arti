@@ -4,6 +4,151 @@ This file describes changes in Arti through the current release.  Once Arti
 is more mature, and we start to version crates independently, we may
 switch to using a separate changelog for each crate.
 
+# Arti 0.4.0 — 27 May 2022
+
+Arti 0.4.0 wraps up our changes to the configuration logic,
+detects several kinds of unsafe filesystem configuration, and has a
+refactored directory manager to help us tolerate far more kinds of broken
+networks and invalid documents.
+
+There are significant breaking changes in this release; please see
+below.
+
+### Breaking changes
+
+- We've merged the last (we hope) of our breaking configuration changes.
+  - Configuration and command-line loading is now handled consistently
+    via the option-agnostic `tor-config` crate. ([!495], [!498])
+  - We follow a uniform pattern where configuration objects are
+    constructed from associated Builder types, and these Builders
+    support [`serde`] traits, and everything provides a consistent
+    API. ([!499], [!505], [!507])
+  - The `arti-config` crate no longer exists: its functionality has been
+    divided among `arti`, `arti-client`, and `tor-config`. ([!508])
+  - The [`TorClientConfig`] object no longer implements
+    `TryInto<DirMgrConfig>`.
+  - The configuration logic now supports extensible configurations,
+    where applications can add their own sections and keys without
+    interfering with Arti, and unrecognized keys can still produce
+    warnings. ([#459], [#417])
+- The [`Runtime`] trait now also requires that `Debug` be implemented.
+  ([!496])
+- (Various smaller breaking changes in lower-level crates.)
+
+### New features
+
+- Arti now checks file permissions before starting up, and rejects
+  configuration files, state files, and cache files if they can be modified
+  by untrusted users. You can disable this feature with the
+  `ARTI_FS_DISABLE_PERMISSION_CHECKS` environment variable.  ([#315],
+  [#465], [!468], [!483], [!504], [!515])
+- Arti now tolerates a much wider array of broken networks and
+  installations when trying to bootstrap a working connection to the Tor
+  network. This includes improved handling for skewed clocks,
+  untimely documents, and invalid consensus documents.  ([#412], [#466],
+  [#467], [!500], [!501], [!511])
+
+### Major bugfixes
+
+- Arti no longer exits or gets stuck when it has received a consensus
+  with invalid signatures, or a consensus claiming to be signed with
+  certificates that don't exist. ([#412], [#439], [!511])
+
+### Infrastructure
+
+- Clean up more effectively in chutney-based test
+  scripts. ([ee9730cab4e4b21e])
+- Nightly [coverage reports] are now generated and exported to gitlab
+  pages. ([!489])
+- We no longer include a dependency on [`cargo-husky`]: If you want to
+  have [git hooks] in your local repository, you'll need to install your
+  own. (See [CONTRIBUTING.md] for instructions.) ([!494])
+- Our shell scripts are more uniform in their behaiour. ([!533])
+
+### Documentation and Examples
+
+- Better documentation for Cargo features. ([#445], [!496])
+- Better explanation of what platforms and dependencies we support,
+  and what "support" means anyway. ([#379], [!513])
+- An advanced example of using the stream isolation feature for
+  trickier behavior. ([#414], [!524])
+
+### Cleanups, minor features, and minor bugfixes
+
+- Use [`tinystr`] to hold relay nicknames; this should save a bit of
+  memory. ([!405])
+- Refactor the [`DirMgr`] crate's bootstrapping implementation to reduce
+  amount of mutable state, reduce complexity, and reduce the amount of
+  code that has to modify a running directory. ([!488])
+- We only check the formatting of our backtraces on our target
+  platforms, to better tolerate operating systems where Rust's
+  backtraces don't correctly include function details. ([#455], [!512])
+- [`DirMgr`] is now better at remembering the origin
+  of a piece of directory information. ([ef2640acfaf9f873])
+- Used a new [`Sink::prepare_send_from`] helper to simplify the
+  implementation of Channel reactors. ([!514])
+- The SOCKS code now sends correct error messages under more
+  circumstances. ([#258], [!531])
+
+
+### Acknowledgments
+
+Thanks to everybody who has contributed to this release, including
+Alex Xu, Dimitris Apostolou, Jim Newsome, Michael Mccune, and Trinity
+Pointard.
+
+[!405]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/405
+[!468]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/468
+[!483]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/483
+[!488]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/488
+[!489]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/489
+[!494]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/494
+[!495]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/495
+[!496]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/496
+[!498]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/498
+[!499]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/499
+[!500]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/500
+[!501]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/501
+[!504]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/504
+[!505]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/505
+[!507]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/507
+[!508]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/508
+[!511]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/511
+[!512]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/512
+[!513]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/513
+[!514]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/514
+[!515]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/515
+[!524]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/524
+[!531]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/531
+[!533]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/533
+[#258]: https://gitlab.torproject.org/tpo/core/arti/-/issues/258
+[#315]: https://gitlab.torproject.org/tpo/core/arti/-/issues/315
+[#379]: https://gitlab.torproject.org/tpo/core/arti/-/issues/379
+[#412]: https://gitlab.torproject.org/tpo/core/arti/-/issues/412
+[#414]: https://gitlab.torproject.org/tpo/core/arti/-/issues/414
+[#417]: https://gitlab.torproject.org/tpo/core/arti/-/issues/417
+[#439]: https://gitlab.torproject.org/tpo/core/arti/-/issues/439
+[#445]: https://gitlab.torproject.org/tpo/core/arti/-/issues/445
+[#455]: https://gitlab.torproject.org/tpo/core/arti/-/issues/455
+[#459]: https://gitlab.torproject.org/tpo/core/arti/-/issues/459
+[#465]: https://gitlab.torproject.org/tpo/core/arti/-/issues/465
+[#466]: https://gitlab.torproject.org/tpo/core/arti/-/issues/466
+[#467]: https://gitlab.torproject.org/tpo/core/arti/-/issues/467
+[ee9730cab4e4b21e]: https://gitlab.torproject.org/tpo/core/arti/-/commit/ee9730cab4e4b21ec40d05becd4c9f54a92d7c29
+[ef2640acfaf9f873]: https://gitlab.torproject.org/tpo/core/arti/-/commit/ef2640acfaf9f873ca3de5253aae93b5032e659a
+[CONTRIBUTING.md]: https://gitlab.torproject.org/tpo/core/arti/-/blob/main/CONTRIBUTING.md
+[`DirMgr`]: https://tpo.pages.torproject.net/core/doc/rust/tor_dirmgr/struct.DirMgr.html
+[`Runtime`]: https://tpo.pages.torproject.net/core/doc/rust/tor_rtcompat/trait.Runtime.html
+[`Sink::prepare_send_from`]: https://tpo.pages.torproject.net/core/doc/rust/tor_basic_utils/futures/trait.SinkExt.html#tymethod.prepare_send_from
+[`TorConfig`]: https://tpo.pages.torproject.net/core/doc/rust/arti_client/config/struct.TorClientConfig.html
+[`cargo-husky`]: https://github.com/rhysd/cargo-husky
+[`serde`]: https://serde.rs/
+[`tinystr`]: https://docs.rs/tinystr/latest/tinystr/
+[coverage reports]: https://tpo.pages.torproject.net/core/arti/coverage/
+[git hooks]: https://gitlab.torproject.org/tpo/core/arti/-/tree/main/maint
+
+
+
 # Arti 0.3.0 — 6 May 2022
 
 Arti 0.3.0 includes several new features, including an improved
