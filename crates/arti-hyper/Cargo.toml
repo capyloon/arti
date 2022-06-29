@@ -1,6 +1,6 @@
 [package]
 name = "arti-hyper"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
 rust-version = "1.56"
@@ -25,13 +25,13 @@ experimental-api = []
 
 [dependencies]
 anyhow = "1.0.23"
-arti-client = { path = "../arti-client", version = "0.4.0" }
+arti-client = { path = "../arti-client", version = "0.4.1" }
 educe = "0.4.6"
 hyper = { version = "0.14", features = ["http1", "client", "runtime"] }
 pin-project = "1"
 thiserror = "1"
-tls-api = { version = "0.8" }
-tls-api-native-tls = { version = "0.8.0" }
+tls-api = "0.9.0"
+tls-api-native-tls = "0.9.0"
 tokio = { package = "tokio", version = "1.7", features = [
     "rt",
     "rt-multi-thread",
@@ -40,8 +40,8 @@ tokio = { package = "tokio", version = "1.7", features = [
     "time",
     "macros",
 ] }
-tor-error = { path = "../tor-error", version = "0.3.1" }
-tor-rtcompat = { path = "../tor-rtcompat", version = "0.4.0", features = ["tokio"] }
+tor-error = { path = "../tor-error", version = "0.3.2" }
+tor-rtcompat = { path = "../tor-rtcompat", version = "0.5.0", features = ["tokio"] }
 
 [dev-dependencies]
 tracing-subscriber = "0.3.0"

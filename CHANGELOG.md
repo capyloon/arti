@@ -4,6 +4,136 @@ This file describes changes in Arti through the current release.  Once Arti
 is more mature, and we start to version crates independently, we may
 switch to using a separate changelog for each crate.
 
+# Arti 0.5.0 — 24 Jun 2022
+
+Arti 0.5.0 adds more cryptographic acceleration, a useful set of toplevel
+build features, reachable-address filtering, detection for failed directory
+downloads, and numerous cleanups.
+
+Note that for the first time, we did _not_ have breaking changes in the
+`arti-client` crate, so its version is staying at 0.4.1.
+
+### Breaking changes
+
+- The `NetDirProvider` trait now requires `Send` and
+  `Sync`. ([2223398eb1670c15])
+- The traits that make up `Runtime` now also require `Send` and
+  `Sync`. ([3ba3b26842254cfd])
+- The "journald" option for LoggingConfig now takes
+  `Option<Into<String>>`. ([!582])
+- (Various smaller breaking changes in lower-level crates.)
+
+### New features
+
+- We can now (optionally) use OpenSSL as our cryptography backend, for
+  its better performance. To enable this, build with the `accel-openssl`
+  feature. ([#441], [#442], [#493], [!550])
+- We can now (optionally) use the assembly implementation of SHA1 in our
+  cryptography backend, for its better performance.  To enable this,
+  build with the `accel-sha1-asm` feature. ([#441], [!590])
+- Our top-level crates (`arti` and `arti-client`) now have a `full`
+  feature that enables _most_ of their optional features—but not those
+  that are unstable, those that are testing-only, those that select a
+  particular implementation or build flag, or those whose licenses may
+  be incompatible with some downstream licenses. ([#499], [!584])
+- We now notice when we get stuck when trying to bootstrap a directory,
+  and report the problem as part of our blockage-detection API. ([#468],
+  [!587])
+- We support a `reachable_addrs` feature that allows the user to tell
+  Arti that only some addresses and/or ports are reachable over the
+  local network.  ([#491], [#93], [!583])
+- Our configuration logic now handles "no such value" options (like
+  using "0" to mean "no port") more consistently, warns about
+  unrecognized options, and includes tests to be sure that the "default
+  configuration" file really lists all of the defaults.  ([#457],
+  [#480], [#488], [!582], [!589], [!594])
+
+### Infrastructure
+
+- Our shell scripts are now more robust to a few different runtime
+  environments. ([!539], [!541])
+- Our license-checking code is more accurate and careful. ([#462], [!559])
+- The PRNG logic in our unit tests now uses reproducible seeds,
+  so that we can better diagnose issues related to sometimes-failing
+  tests. ([!561])
+
+### Cleanups, minor features, and minor bugfixes
+
+- The `fs-mistrust` crate now handles environments where
+  `getgrouplist()` doesn't include the current GID. ([#487], [!548])
+- `dns_port` now de-duplicates requests based on transaction
+   ID. ([#441], [!535])
+- `dns_port` returns more accurate errors in several cases. ([!564])
+- More unit tests in various places. ([!551], [!562])
+- We avoid initializing a `DataStream` if it would immediately be
+  closed. ([!556])
+- We return a more useful error message for incorrect file permissions
+  ([!554])
+- The directory manager code now uses a refactored timing backend that
+  knows how to respect dormant mode. ([#497], [!571])
+- Fix an unreliable test related to guard filtering. ([#491],
+  [89f9e1decb7872d6])
+- We now use a constant-time implementation of base-64
+  decoding. ([#154], [!600])
+- We now make sure that at least _some_ log messages can get reported
+  before the logging is configured.  In particular, unknown
+  configuration settings now generate warning messages on stderr when
+  `arti` starts up.  ([!589])
+- Many of our lower-level `Error` types have been refactored to give
+  more accurate, useful, and best-practices-conformant messages.
+  ([#323], [!598], [!601], [!604])
+
+### Acknowledgments
+
+Thanks to everybody who has contributed to this release, including
+0x4ndy, Alex Xu, Arturo Marquez, Dimitris Apostolou, Michael McCune,
+Neel Chauhan, Orhun Parmaksız, Steven Murdoch, and Trinity Pointard.
+
+[!535]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/535
+[!539]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/539
+[!541]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/541
+[!548]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/548
+[!550]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/550
+[!551]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/551
+[!554]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/554
+[!556]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/556
+[!559]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/559
+[!561]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/561
+[!562]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/562
+[!564]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/564
+[!571]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/571
+[!582]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/582
+[!583]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/583
+[!584]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/584
+[!587]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/587
+[!589]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/589
+[!590]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/590
+[!594]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/594
+[!598]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/598
+[!600]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/600
+[!601]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/601
+[!604]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/604
+[#93]: https://gitlab.torproject.org/tpo/core/arti/-/issues/93
+[#154]: https://gitlab.torproject.org/tpo/core/arti/-/issues/154
+[#323]: https://gitlab.torproject.org/tpo/core/arti/-/issues/323
+[#441]: https://gitlab.torproject.org/tpo/core/arti/-/issues/441
+[#442]: https://gitlab.torproject.org/tpo/core/arti/-/issues/442
+[#457]: https://gitlab.torproject.org/tpo/core/arti/-/issues/457
+[#462]: https://gitlab.torproject.org/tpo/core/arti/-/issues/462
+[#468]: https://gitlab.torproject.org/tpo/core/arti/-/issues/468
+[#480]: https://gitlab.torproject.org/tpo/core/arti/-/issues/480
+[#487]: https://gitlab.torproject.org/tpo/core/arti/-/issues/487
+[#488]: https://gitlab.torproject.org/tpo/core/arti/-/issues/488
+[#491]: https://gitlab.torproject.org/tpo/core/arti/-/issues/491
+[#493]: https://gitlab.torproject.org/tpo/core/arti/-/issues/493
+[#497]: https://gitlab.torproject.org/tpo/core/arti/-/issues/497
+[#499]: https://gitlab.torproject.org/tpo/core/arti/-/issues/499
+[2223398eb1670c15]: https://gitlab.torproject.org/tpo/core/arti/-/commit/2223398eb1670c159151bc9aae5fed346b88c904
+[3ba3b26842254cfd]: https://gitlab.torproject.org/tpo/core/arti/-/commit/3ba3b26842254cfd9033ea37b44b746895bcbd02
+[89f9e1decb7872d6]: https://gitlab.torproject.org/tpo/core/arti/-/commit/89f9e1decb7872d688d126fe41ab28b6bd0504a0
+
+
+
 # Arti 0.4.0 — 27 May 2022
 
 Arti 0.4.0 wraps up our changes to the configuration logic,
