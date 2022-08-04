@@ -4,6 +4,165 @@ This file describes changes in Arti through the current release.  Once Arti
 is more mature, and we start to version crates independently, we may
 switch to using a separate changelog for each crate.
 
+
+# Arti 0.6.0 — 1 August 2022
+
+Arti 0.6.0 fixes bugs, cleans up some messy internals, improves error
+messages, and adds more preparation for future work in netflow padding.
+
+(These notes summarize changes in all crates since Arti 0.5.0.)
+
+### Breaking changes
+
+- The `download_tolerance` configuration section has been renamed to
+  `directory_tolerance`: It's not about tolerances at download time, but
+  rather about how expired or premature a directory can be. The related
+  `DirSkewTolerance` has also been renamed. ([#503], [!638])
+- Several methods related to managing the [`Mistrust`] file-permissions
+  object have been removed or changed, thanks to refactoring elsewhere.
+  ([#483], [#640])
+
+### Breaking changes in lower level crates
+
+These changes should not break any code that only depends on the
+[`arti_client`] APIs, but they will affect programs that use APIs from
+lower-level crates to interact more closely with the Tor protocols.
+
+- The `Error` types in all crates have been refactored to include far more
+  accurate information about errors and their context.  This does not break
+  the [`arti_client`] API, but it will affect anybody using lower-level
+  crates. ([#323], [!614], [!616], [!619], [!620], [!625], [!628], [!638])
+- The [`Writeable`] trait used to encode data, and related methods,
+  are now fallible.  Previously they had no way to report errors.
+  ([#513], [!623], [!640])
+- The [`tor-cert`] APIs have been tweaked to support more compact
+  internal representations and more idiomatic usage. ([#512], [!641],
+  [!643]).
+- The [`NetDirProvider`] API, and related APIs in [`tor-dirmgr`], have been
+  changed to support returning network directories with varying timeliness
+  requirements. ([#528], [!642])
+- The [`fs-mistrust`] API no longer supports certain operations related to
+  unix groups, when built on iOS. ([!652])
+
+### New features
+
+- The internal [`tor-cert`] API now supports generating Tor-compatible
+  certificates. ([#511], [!611])
+- Improved API support for circuit handshakes that include external
+  encrypted data, such as [`ntor-v3`] and [`hs-ntor`]. ([!618])
+
+### Major bugfixes
+
+- Fix a bug that prevented Arti from storing consensus files on
+  Windows. Previously, we had generated filenames containing a colon, which
+  Windows treats as a reserved character. ([#516], [!627])
+- Fix compilation on iOS.  Our dependency on the [`rust-users`] crate
+  had broken our ability to work correctly there. ([#519], [!652])
+
+### Infrastructure
+
+- Our license checker now tolerates complicated licenses with nested boolean
+  expressions, by explicitly allow-listing the ones we like. ([!635])
+
+### Cleanups, minor features, and minor bugfixes
+
+- Upgrade to a newer version of [`base64ct`], and remove some work-around
+  logic required for the older versions.  ([!608])
+- Various typo fixes. ([!609], [!610], [!650])
+- Upgrade to a pre-release version of
+  [`x25519-dalek`] to avoid a hard dependency on an outdated version of
+  [`zeroize`], so we can follow the latest version of the [`rsa`] crate.
+  ([#448], [!612])
+- Our client-global "dormant mode" flag is now published via a
+  [`postage::watch`], which makes it easier to observe for changes. ([!632])
+- Preliminary (unused) support for some onion-service-related cells.
+  ([!626])
+- The [`fs-mistrust`] crate can now use environment variables to be told to
+  disable itself. This has allowed for simplifications elsewhere in our
+  configuration logic. ([#483], [!630])
+- Clean up an incorrect `--help` message. ([!633])
+
+### Testing
+
+- More tests for [`arti-hyper`]. ([!615])
+- More tests for our undderlying base-64 implementation. ([!613])
+
+### Acknowledgments
+
+Thanks to everyone who has contributed to this release, including Arturo
+Marquez, Dimitris Apostolou, `feelingnothing`, Jim Newsome, Richard
+Pospesel, `spongechameleon`, Trinity Pointard, and Yuan Lyu.
+
+[!608]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/608
+[!609]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/609
+[!610]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/610
+[!611]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/611
+[!612]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/612
+[!613]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/613
+[!614]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/614
+[!615]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/615
+[!616]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/616
+[!618]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/618
+[!619]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/619
+[!620]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/620
+[!623]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/623
+[!625]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/625
+[!626]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/626
+[!627]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/627
+[!628]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/628
+[!630]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/630
+[!632]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/632
+[!633]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/633
+[!635]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/635
+[!638]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/638
+[!640]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/640
+[!641]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/641
+[!642]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/642
+[!643]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/643
+[!650]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/650
+[!652]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/652
+[#323]: https://gitlab.torproject.org/tpo/core/arti/-/issues/323
+[#448]: https://gitlab.torproject.org/tpo/core/arti/-/issues/448
+[#483]: https://gitlab.torproject.org/tpo/core/arti/-/issues/483
+[#503]: https://gitlab.torproject.org/tpo/core/arti/-/issues/503
+[#511]: https://gitlab.torproject.org/tpo/core/arti/-/issues/511
+[#512]: https://gitlab.torproject.org/tpo/core/arti/-/issues/512
+[#513]: https://gitlab.torproject.org/tpo/core/arti/-/issues/513
+[#516]: https://gitlab.torproject.org/tpo/core/arti/-/issues/516
+[#519]: https://gitlab.torproject.org/tpo/core/arti/-/issues/519
+[#528]: https://gitlab.torproject.org/tpo/core/arti/-/issues/528
+[#640]: https://gitlab.torproject.org/tpo/core/arti/-/issues/640
+[`Mistrust`]: https://tpo.pages.torproject.net/core/doc/rust/fs_mistrust/struct.Mistrust.html
+[`NetDirProvider`]: https://tpo.pages.torproject.net/core/doc/rust/tor_netdir/trait.NetDirProvider.html
+[`Writeable`]: https://tpo.pages.torproject.net/core/doc/rust/tor_bytes/trait.Writeable.html
+[`arti-hyper`]: https://tpo.pages.torproject.net/core/doc/rust/arti_hyper/index.html
+[`arti_client`]: https://tpo.pages.torproject.net/core/doc/rust/arti_client/index.html
+[`base64ct`]: https://docs.rs/base64ct/latest/base64ct/
+[`fs-mistrust`]: https://tpo.pages.torproject.net/core/doc/rust/fs_mistrust/index.html
+[`hs-ntor`]: https://gitlab.torproject.org/tpo/core/torspec/-/blob/main/rend-spec-v3.txt#L1876
+[`ntor-v3`]: https://gitlab.torproject.org/tpo/core/torspec/-/blob/main/proposals/332-ntor-v3-with-extra-data.md
+[`postage::watch`]: https://docs.rs/postage/latest/postage/watch/index.html
+[`rsa`]: https://docs.rs/rsa/latest/rsa/
+[`rust-users`]: https://docs.rs/users/latest/users/
+[`tor-cert`]: https://tpo.pages.torproject.net/core/doc/rust/tor_cert/index.html
+[`tor-dirmgr`]: https://tpo.pages.torproject.net/core/doc/rust/tor_dirmgr/index.html
+[`x25519-dalek`]: https://docs.rs/x25519-dalek/latest/x25519_dalek/
+[`zeroize`]: https://docs.rs/zeroize/latest/zeroize/
+
+
+
+
+# tor-dirmgr patch release 0.5.1 — 14 July 2022
+
+On 14 July 2022, we put out a patch release (0.5.1) to `tor-dirmgr`, to fix
+a bug that prevented Arti from storing consensus files on
+Windows. Previously, we had generated filenames containing a colon, which
+Windows treats as a reserved character.
+
+Thanks to "@feelingnothing" for the bug report and the fix.
+
+
+
 # Arti 0.5.0 — 24 Jun 2022
 
 Arti 0.5.0 adds more cryptographic acceleration, a useful set of toplevel

@@ -1325,16 +1325,18 @@ impl<B: AbstractCircBuilder + 'static, R: Runtime> AbstractCircMgr<B, R> {
     /// no longer be given out for new circuits.
     pub(crate) fn expire_circs(&self, now: Instant) {
         let mut list = self.circs.lock().expect("poisoned lock");
-        let dirty_cutoff = now - self.circuit_timing().max_dirtiness;
-        list.expire_circs(now, dirty_cutoff);
+        if let Some(dirty_cutoff) = now.checked_sub(self.circuit_timing().max_dirtiness) {
+            list.expire_circs(now, dirty_cutoff);
+        }
     }
 
     /// Consider expiring the circuit with given circuit `id`,
     /// according to the rules in `config` and the current time `now`.
     pub(crate) fn expire_circ(&self, circ_id: &<B::Circ as AbstractCirc>::Id, now: Instant) {
         let mut list = self.circs.lock().expect("poisoned lock");
-        let dirty_cutoff = now - self.circuit_timing().max_dirtiness;
-        list.expire_circ(circ_id, now, dirty_cutoff);
+        if let Some(dirty_cutoff) = now.checked_sub(self.circuit_timing().max_dirtiness) {
+            list.expire_circ(circ_id, now, dirty_cutoff);
+        }
     }
 
     /// Return the number of open circuits held by this circuit manager.
@@ -1437,6 +1439,7 @@ mod test {
     use once_cell::sync::Lazy;
     use std::collections::BTreeSet;
     use std::sync::atomic::{self, AtomicUsize};
+    use tor_basic_utils::iter::FilterCount;
     use tor_guardmgr::fallback::FallbackList;
     use tor_netdir::testnet;
     use tor_rtcompat::SleepProvider;
@@ -1578,7 +1581,11 @@ mod test {
         fn plan_circuit(&self, spec: &FakeSpec, _dir: DirInfo<'_>) -> Result<(FakePlan, FakeSpec)> {
             let next_op = self.next_op(spec);
             if matches!(next_op, FakeOp::NoPlan) {
-                return Err(Error::NoPath("No relays for you".into()));
+                return Err(Error::NoPath {
+                    role: "relay",
+                    can_share: FilterCount::default(),
+                    correct_usage: FilterCount::default(),
+                });
             }
             let plan = FakePlan {
                 spec: spec.clone(),

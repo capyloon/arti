@@ -280,9 +280,10 @@
 //! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 
 mod dir;
+mod disable;
 mod err;
 mod imp;
-#[cfg(target_family = "unix")]
+#[cfg(all(target_family = "unix", not(target_os = "ios")))]
 mod user;
 
 #[cfg(test)]
@@ -298,12 +299,13 @@ use std::{
 };
 
 pub use dir::CheckedDir;
+pub use disable::GLOBAL_DISABLE_VAR;
 pub use err::Error;
 
 /// A result type as returned by this crate
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(target_family = "unix")]
+#[cfg(all(target_family = "unix", not(target_os = "ios")))]
 pub use user::{TrustedGroup, TrustedUser};
 
 /// Configuration for verifying that a file or directory is really "private".
@@ -337,12 +339,29 @@ pub struct Mistrust {
     )]
     ignore_prefix: Option<PathBuf>,
 
-    /// Are we configured to enable all permission and ownership tests?
-    #[builder(default, setter(custom))]
-    dangerously_trust_everyone: bool,
+    /// Are we configured to disable all permission and ownership tests?
+    ///
+    /// (This field is present in the builder only.)
+    #[builder(setter(custom), field(type = "Option<bool>", build = "()"))]
+    dangerously_trust_everyone: (),
+
+    /// Should we check the environment to decide whether to disable permission
+    /// and ownership tests?
+    ///
+    /// (This field is present in the builder only.)
+    #[builder(setter(custom), field(type = "Option<disable::Disable>", build = "()"))]
+    #[cfg_attr(feature = "serde", builder_field_attr(serde(skip)))]
+    disable_by_environment: (),
+
+    /// Internal value combining `dangerously_trust_everyone` and
+    /// `disable_by_environment` to decide whether we're doing permissions
+    /// checks or not.
+    #[builder(setter(custom), field(build = "self.should_be_enabled()"))]
+    #[cfg_attr(feature = "serde", builder_field_attr(serde(skip)))]
+    status: disable::Status,
 
     /// What user ID do we trust by default (if any?)
-    #[cfg(target_family = "unix")]
+    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
     #[builder(
         setter(into),
         field(type = "TrustedUser", build = "self.trust_user.get_uid()?")
@@ -350,7 +369,7 @@ pub struct Mistrust {
     trust_user: Option<u32>,
 
     /// What group ID do we trust by default (if any?)
-    #[cfg(target_family = "unix")]
+    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
     #[builder(
         setter(into),
         field(type = "TrustedGroup", build = "self.trust_group.get_gid()?")
@@ -381,7 +400,7 @@ impl MistrustBuilder {
     /// trusted.
     ///
     /// This option disables the default group-trust behavior as well.
-    #[cfg(target_family = "unix")]
+    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
     pub fn trust_admin_only(&mut self) -> &mut Self {
         self.trust_user = TrustedUser::None;
         self.trust_group = TrustedGroup::None;
@@ -396,7 +415,7 @@ impl MistrustBuilder {
     /// With this option set, no group is trusted, and and any group-readable or
     /// group-writable objects are treated the same as world-readable and
     /// world-writable objects respectively.
-    #[cfg(target_family = "unix")]
+    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
     pub fn trust_no_group_id(&mut self) -> &mut Self {
         self.trust_group = TrustedGroup::None;
         self
@@ -412,6 +431,8 @@ impl MistrustBuilder {
     /// these checks optional, and still use [`CheckedDir`] without having to
     /// implement separate code paths for the "checking on" and "checking off"
     /// cases.
+    ///
+    /// Setting this flag will supersede any value set in the environment.
     pub fn dangerously_trust_everyone(&mut self) -> &mut Self {
         self.dangerously_trust_everyone = Some(true);
         self
@@ -422,6 +443,69 @@ impl MistrustBuilder {
     pub fn remove_ignored_prefix(&mut self) -> &mut Self {
         self.ignore_prefix = Some(None);
         self
+    }
+
+    /// Configure this [`MistrustBuilder`] to become disabled based on the
+    /// environment variable `var`.
+    ///
+    /// (If the variable is "false", "no", or "0", it will be treated as
+    /// false; other values are treated as true.)
+    ///
+    /// If `var` is not set, then we'll look at
+    /// `$FS_MISTRUST_DISABLE_PERMISSIONS_CHECKS`.
+    pub fn controlled_by_env_var(&mut self, var: &str) -> &mut Self {
+        self.disable_by_environment = Some(disable::Disable::OnUserEnvVar(var.to_string()));
+        self
+    }
+
+    /// Like `controlled_by_env_var`, but do not override any previously set
+    /// environment settings.
+    ///
+    /// (The `arti-client` wants this, so that it can inform a caller-supplied
+    /// `MistrustBuilder` about its Arti-specific env var, but only if the
+    /// caller has not already provided a variable of its own. Other code
+    /// embedding `fs-mistrust` may want it too.)
+    pub fn controlled_by_env_var_if_not_set(&mut self, var: &str) -> &mut Self {
+        if self.disable_by_environment.is_none() {
+            self.controlled_by_env_var(var)
+        } else {
+            self
+        }
+    }
+
+    /// Configure this [`MistrustBuilder`] to become disabled based on the
+    /// environment variable `$FS_MISTRUST_DISABLE_PERMISSIONS_CHECKS` only,
+    ///
+    /// (If the variable is "false", "no", "0", or "", it will be treated as
+    /// false; other values are treated as true.)
+    ///
+    /// This is the default.
+    pub fn controlled_by_default_env_var(&mut self) -> &mut Self {
+        self.disable_by_environment = Some(disable::Disable::OnGlobalEnvVar);
+        self
+    }
+
+    /// Configure this [`MistrustBuilder`] to never consult the environment to
+    /// see whether it should be disabled.
+    pub fn ignore_environment(&mut self) -> &mut Self {
+        self.disable_by_environment = Some(disable::Disable::Never);
+        self
+    }
+
+    /// Considering our settings, determine whether we should trust all users
+    /// (and thereby disable our permission checks.)
+    fn should_be_enabled(&self) -> disable::Status {
+        // If we've disabled checks in our configuration, then that settles it.
+        if self.dangerously_trust_everyone == Some(true) {
+            return disable::Status::DisableChecks;
+        }
+
+        // Otherwise, we use our "disable_by_environment" setting to see whether
+        // we should check the environment.
+        self.disable_by_environment
+            .as_ref()
+            .unwrap_or(&disable::Disable::default())
+            .should_disable_checks()
     }
 }
 
@@ -529,6 +613,12 @@ impl Mistrust {
     pub fn make_directory<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
         self.verifier().make_directory(dir)
     }
+
+    /// Return true if this `Mistrust` object has been configured to trust all
+    /// users.
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.status.disabled()
+    }
 }
 
 impl<'a> Verifier<'a> {
@@ -629,9 +719,8 @@ impl<'a> Verifier<'a> {
             next
         };
 
-        match opt_error {
-            Some(err) => return Err(err),
-            None => {}
+        if let Some(err) = opt_error {
+            return Err(err);
         }
 
         Ok(())
