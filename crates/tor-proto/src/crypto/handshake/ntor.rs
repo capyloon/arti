@@ -3,11 +3,11 @@
 use super::{KeyGenerator, RelayHandshakeError, RelayHandshakeResult};
 use crate::util::ct;
 use crate::{Error, Result, SecretBytes};
-use tor_bytes::{Reader, Writer};
+use tor_bytes::{EncodeResult, Reader, Writer};
+use tor_error::into_internal;
 use tor_llcrypto::d;
 use tor_llcrypto::pk::curve25519::*;
 use tor_llcrypto::pk::rsa::RsaIdentity;
-use tor_llcrypto::util::rand_compat::RngCompatExt;
 
 use digest::Mac;
 use rand_core::{CryptoRng, RngCore};
@@ -25,7 +25,7 @@ impl super::ClientHandshake for NtorClient {
         rng: &mut R,
         key: &Self::KeyType,
     ) -> Result<(Self::StateType, Vec<u8>)> {
-        Ok(client_handshake_ntor_v1(rng, key))
+        client_handshake_ntor_v1(rng, key)
     }
 
     fn client2<T: AsRef<[u8]>>(state: Self::StateType, msg: T) -> Result<Self::KeyGen> {
@@ -130,11 +130,11 @@ type Authcode = digest::CtOutput<hmac::Hmac<d::Sha256>>;
 fn client_handshake_ntor_v1<R>(
     rng: &mut R,
     relay_public: &NtorPublicKey,
-) -> (NtorHandshakeState, Vec<u8>)
+) -> Result<(NtorHandshakeState, Vec<u8>)>
 where
     R: RngCore + CryptoRng,
 {
-    let my_sk = StaticSecret::new(rng.rng_compat());
+    let my_sk = StaticSecret::new(rng);
     let my_public = PublicKey::from(&my_sk);
 
     client_handshake_ntor_v1_no_keygen(my_public, my_sk, relay_public)
@@ -145,12 +145,13 @@ fn client_handshake_ntor_v1_no_keygen(
     my_public: PublicKey,
     my_sk: StaticSecret,
     relay_public: &NtorPublicKey,
-) -> (NtorHandshakeState, Vec<u8>) {
+) -> Result<(NtorHandshakeState, Vec<u8>)> {
     let mut v: Vec<u8> = Vec::new();
 
-    v.write(&relay_public.id);
-    v.write(&relay_public.pk);
-    v.write(&my_public);
+    v.write(&relay_public.id)
+        .and_then(|_| v.write(&relay_public.pk))
+        .and_then(|_| v.write(&my_public))
+        .map_err(|e| Error::from_bytes_enc(e, "Can't encode client handshake."))?;
 
     assert_eq!(v.len(), 20 + 32 + 32);
 
@@ -160,7 +161,7 @@ fn client_handshake_ntor_v1_no_keygen(
         my_sk,
     };
 
-    (state, v)
+    Ok((state, v))
 }
 
 /// Complete a client handshake, returning a key generator on success.
@@ -180,7 +181,8 @@ where
     let xb = state.my_sk.diffie_hellman(&state.relay_public.pk);
 
     let (keygen, authcode) =
-        ntor_derive(&xy, &xb, &state.relay_public, &state.my_public, &their_pk);
+        ntor_derive(&xy, &xb, &state.relay_public, &state.my_public, &their_pk)
+            .map_err(into_internal!("Error deriving keys"))?;
 
     let okay = authcode.ct_eq(&auth)
         & ct::bool_to_choice(xy.was_contributory())
@@ -203,20 +205,20 @@ fn ntor_derive(
     server_pk: &NtorPublicKey,
     x: &PublicKey,
     y: &PublicKey,
-) -> (NtorHkdfKeyGenerator, Authcode) {
+) -> EncodeResult<(NtorHkdfKeyGenerator, Authcode)> {
     let ntor1_protoid = &b"ntor-curve25519-sha256-1"[..];
     let ntor1_mac = &b"ntor-curve25519-sha256-1:mac"[..];
     let ntor1_verify = &b"ntor-curve25519-sha256-1:verify"[..];
     let server_string = &b"Server"[..];
 
     let mut secret_input = Zeroizing::new(Vec::new());
-    secret_input.write(xy); // EXP(X,y)
-    secret_input.write(xb); // EXP(X,b)
-    secret_input.write(&server_pk.id); // ID
-    secret_input.write(&server_pk.pk); // B
-    secret_input.write(x); // X
-    secret_input.write(y); // Y
-    secret_input.write(ntor1_protoid); // PROTOID
+    secret_input.write(xy)?; // EXP(X,y)
+    secret_input.write(xb)?; // EXP(X,b)
+    secret_input.write(&server_pk.id)?; // ID
+    secret_input.write(&server_pk.pk)?; // B
+    secret_input.write(x)?; // X
+    secret_input.write(y)?; // Y
+    secret_input.write(ntor1_protoid)?; // PROTOID
 
     use hmac::Hmac;
     use tor_llcrypto::d::Sha256;
@@ -227,13 +229,13 @@ fn ntor_derive(
         m.finalize()
     };
     let mut auth_input: SecretBytes = Zeroizing::new(Vec::new());
-    auth_input.write_and_consume(verify); // verify
-    auth_input.write(&server_pk.id); // ID
-    auth_input.write(&server_pk.pk); // B
-    auth_input.write(y); // Y
-    auth_input.write(x); // X
-    auth_input.write(ntor1_protoid); // PROTOID
-    auth_input.write(server_string); // "Server"
+    auth_input.write_and_consume(verify)?; // verify
+    auth_input.write(&server_pk.id)?; // ID
+    auth_input.write(&server_pk.pk)?; // B
+    auth_input.write(y)?; // Y
+    auth_input.write(x)?; // X
+    auth_input.write(ntor1_protoid)?; // PROTOID
+    auth_input.write(server_string)?; // "Server"
 
     let auth_mac = {
         let mut m =
@@ -243,7 +245,7 @@ fn ntor_derive(
     };
 
     let keygen = NtorHkdfKeyGenerator::new(secret_input);
-    (keygen, auth_mac)
+    Ok((keygen, auth_mac))
 }
 
 /// Perform a server-side ntor handshake.
@@ -262,7 +264,7 @@ where
     // actually going to find our nodeid or keyid. Perhaps we should
     // delay that till later?  It shouldn't matter for most cases,
     // though.
-    let ephem = EphemeralSecret::new(rng.rng_compat());
+    let ephem = EphemeralSecret::new(rng);
     let ephem_pub = PublicKey::from(&ephem);
 
     server_handshake_ntor_v1_no_keygen(ephem_pub, ephem, msg, keys)
@@ -300,11 +302,16 @@ where
     let okay =
         ct::bool_to_choice(xy.was_contributory()) & ct::bool_to_choice(xb.was_contributory());
 
-    let (keygen, authcode) = ntor_derive(&xy, &xb, &keypair.pk, &their_pk, &ephem_pub);
+    let (keygen, authcode) = ntor_derive(&xy, &xb, &keypair.pk, &their_pk, &ephem_pub)
+        .map_err(into_internal!("Error deriving keys"))?;
 
     let mut reply: Vec<u8> = Vec::new();
-    reply.write(&ephem_pub);
-    reply.write_and_consume(authcode);
+    reply
+        .write(&ephem_pub)
+        .and_then(|_| reply.write_and_consume(authcode))
+        .map_err(into_internal!(
+            "Generated relay handshake we couldn't encode"
+        ))?;
 
     if okay.into() {
         Ok((keygen, reply))
@@ -323,7 +330,7 @@ mod tests {
     #[test]
     fn simple() -> Result<()> {
         use crate::crypto::handshake::{ClientHandshake, ServerHandshake};
-        let mut rng = testing_rng().rng_compat();
+        let mut rng = testing_rng();
         let relay_secret = StaticSecret::new(&mut rng);
         let relay_public = PublicKey::from(&relay_secret);
         let relay_identity = RsaIdentity::from_bytes(&[12; 20]).unwrap();
@@ -353,7 +360,7 @@ mod tests {
 
     fn make_fake_ephem_key(bytes: &[u8]) -> EphemeralSecret {
         assert_eq!(bytes.len(), 32);
-        let mut rng = FakePRNG::new(bytes).rng_compat();
+        let mut rng = FakePRNG::new(bytes);
         EphemeralSecret::new(&mut rng)
     }
 
@@ -382,7 +389,7 @@ mod tests {
         };
 
         let (state, create_msg) =
-            client_handshake_ntor_v1_no_keygen(x_pk.into(), x_sk.into(), &relay_pk);
+            client_handshake_ntor_v1_no_keygen(x_pk.into(), x_sk.into(), &relay_pk).unwrap();
         assert_eq!(&create_msg[..], &client_handshake[..]);
 
         let ephem = make_fake_ephem_key(&y_sk[..]);
@@ -405,7 +412,7 @@ mod tests {
     #[test]
     fn failing_handshakes() {
         use crate::crypto::handshake::{ClientHandshake, ServerHandshake};
-        let mut rng = testing_rng().rng_compat();
+        let mut rng = testing_rng();
 
         // Set up keys.
         let relay_secret = StaticSecret::new(&mut rng);

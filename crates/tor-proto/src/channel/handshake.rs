@@ -156,7 +156,11 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider>
             let my_versions = msg::Versions::new(LINK_PROTOCOLS)
                 .map_err(|e| Error::from_cell_enc(e, "versions message"))?;
             self.tls
-                .write_all(&my_versions.encode_for_handshake())
+                .write_all(
+                    &my_versions
+                        .encode_for_handshake()
+                        .map_err(|e| Error::from_cell_enc(e.into(), "versions message"))?,
+                )
                 .await
                 .map_err(io_err_to_handshake)?;
             self.tls.flush().await.map_err(io_err_to_handshake)?;
@@ -407,7 +411,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
 
         // Check the identity->signing cert
         let (id_sk, id_sk_sig) = id_sk
-            .check_key(&None)
+            .check_key(None)
             .map_err(Error::HandshakeCertErr)?
             .dangerously_split()
             .map_err(Error::HandshakeCertErr)?;
@@ -427,7 +431,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
         // Now look at the signing->TLS cert and check it against the
         // peer certificate.
         let (sk_tls, sk_tls_sig) = sk_tls
-            .check_key(&Some(*signing_key))
+            .check_key(Some(signing_key))
             .map_err(Error::HandshakeCertErr)?
             .dangerously_split()
             .map_err(Error::HandshakeCertErr)?;
@@ -450,8 +454,6 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
                 "Invalid ed25519 signature in handshake".into(),
             ));
         }
-
-        let ed25519_id: Ed25519Identity = identity_key.into();
 
         // Part 2: validate rsa stuff.
 
@@ -490,7 +492,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
         trace!(
             "{}: Validated identity as {} [{}]",
             self.unique_id,
-            ed25519_id,
+            identity_key,
             rsa_id
         );
 
@@ -502,7 +504,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
         // We do this _last_, since "this is the wrong peer" is
         // usually a different situation than "this peer couldn't even
         // identify itself right."
-        if *peer.ed_identity() != ed25519_id {
+        if peer.ed_identity() != identity_key {
             return Err(Error::HandshakeProto(
                 "Peer ed25519 id not as expected".into(),
             ));
@@ -535,7 +537,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
             tls: self.tls,
             unique_id: self.unique_id,
             target_addr: self.target_addr,
-            ed25519_id,
+            ed25519_id: *identity_key,
             rsa_id,
             clock_skew: self.clock_skew,
             sleep_prov: self.sleep_prov,
