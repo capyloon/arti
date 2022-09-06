@@ -25,6 +25,7 @@ pub enum CertError {
 
 /// An error related to signing or encoding a certificate
 #[cfg(feature = "encode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encode")))]
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum CertEncodeError {
@@ -45,7 +46,7 @@ pub enum CertEncodeError {
     #[error("Missing field {0:?}")]
     MissingField(&'static str),
 
-    /// We encounted a problem when encoding the certificate: probably, that
+    /// We encountered a problem when encoding the certificate: probably, that
     /// some length field would have to be longer than its maximum.  This is
     /// probably a bug in the calling code.
     #[error("Tried to generate a cert we couldn't encode.")]

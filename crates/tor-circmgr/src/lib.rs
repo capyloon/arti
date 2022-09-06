@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
 //! `tor-circmgr`: circuits through the Tor network on demand.
 //!
 //! # Overview
@@ -96,6 +97,7 @@ use crate::mgr::CircProvenance;
 use crate::preemptive::PreemptiveCircuitPredictor;
 use usage::TargetCircUsage;
 
+use safelog::sensitive as sv;
 pub use tor_guardmgr::{ExternalActivity, FirstHopId};
 use tor_persist::{FsStateMgr, StateMgr};
 use tor_rtcompat::scheduler::{TaskHandle, TaskSchedule};
@@ -474,7 +476,11 @@ impl<R: Runtime> CircMgr<R> {
                     trace!("Circuit already existed created for {:?}", circs[i]);
                 }
                 Err(e) => {
-                    warn!("Failed to build preemptive circuit {:?}: {}", circs[i], &e);
+                    warn!(
+                        "Failed to build preemptive circuit {:?}: {}",
+                        sv(&circs[i]),
+                        &e
+                    );
                     n_errors += 1;
                 }
             }
@@ -736,11 +742,10 @@ impl<R: Runtime> CircMgr<R> {
         target: &impl ChanTarget,
         external_failure: ExternalActivity,
     ) {
-        self.mgr.peek_builder().guardmgr().note_external_failure(
-            target.ed_identity(),
-            target.rsa_identity(),
-            external_failure,
-        );
+        self.mgr
+            .peek_builder()
+            .guardmgr()
+            .note_external_failure(target, external_failure);
     }
 
     /// Record that a success occurred on a circuit with a given guard, in a way
@@ -750,11 +755,10 @@ impl<R: Runtime> CircMgr<R> {
         target: &impl ChanTarget,
         external_activity: ExternalActivity,
     ) {
-        self.mgr.peek_builder().guardmgr().note_external_success(
-            target.ed_identity(),
-            target.rsa_identity(),
-            external_activity,
-        );
+        self.mgr
+            .peek_builder()
+            .guardmgr()
+            .note_external_success(target, external_activity);
     }
 
     /// Return a stream of events about our estimated clock skew; these events

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
 //! # `fs-mistrust`: check whether file permissions are private.
 //!
 //! This crate provides a set of functionality to check the permissions on files
@@ -116,8 +117,9 @@
 //! let my_mistrust = Mistrust::builder()
 //!     // Assume that our home directory and its parents are all well-configured.
 //!     .ignore_prefix("/home/doze/")
-//!     // Assume that a given group will only contain trusted users.
-//!     .trust_group(413)
+//!     // Assume that a given group will only contain trusted users (this feature is only
+//!     // available on Unix-like platforms).
+//!     // .trust_group(413)
 //!     .build()?;
 //! # Ok(())
 //! # }
@@ -283,9 +285,15 @@ mod dir;
 mod disable;
 mod err;
 mod imp;
-#[cfg(all(target_family = "unix", not(target_os = "ios")))]
+#[cfg(all(
+    target_family = "unix",
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 mod user;
 
+#[cfg(feature = "anon_home")]
+pub mod anon_home;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod walk;
@@ -305,7 +313,11 @@ pub use err::Error;
 /// A result type as returned by this crate
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(all(target_family = "unix", not(target_os = "ios")))]
+#[cfg(all(
+    target_family = "unix",
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 pub use user::{TrustedGroup, TrustedUser};
 
 /// Configuration for verifying that a file or directory is really "private".
@@ -361,7 +373,11 @@ pub struct Mistrust {
     status: disable::Status,
 
     /// What user ID do we trust by default (if any?)
-    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
+    #[cfg(all(
+        target_family = "unix",
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     #[builder(
         setter(into),
         field(type = "TrustedUser", build = "self.trust_user.get_uid()?")
@@ -369,7 +385,11 @@ pub struct Mistrust {
     trust_user: Option<u32>,
 
     /// What group ID do we trust by default (if any?)
-    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
+    #[cfg(all(
+        target_family = "unix",
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     #[builder(
         setter(into),
         field(type = "TrustedGroup", build = "self.trust_group.get_gid()?")
@@ -400,7 +420,11 @@ impl MistrustBuilder {
     /// trusted.
     ///
     /// This option disables the default group-trust behavior as well.
-    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
+    #[cfg(all(
+        target_family = "unix",
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     pub fn trust_admin_only(&mut self) -> &mut Self {
         self.trust_user = TrustedUser::None;
         self.trust_group = TrustedGroup::None;
@@ -415,7 +439,11 @@ impl MistrustBuilder {
     /// With this option set, no group is trusted, and and any group-readable or
     /// group-writable objects are treated the same as world-readable and
     /// world-writable objects respectively.
-    #[cfg(all(target_family = "unix", not(target_os = "ios")))]
+    #[cfg(all(
+        target_family = "unix",
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     pub fn trust_no_group_id(&mut self) -> &mut Self {
         self.trust_group = TrustedGroup::None;
         self
@@ -790,8 +818,12 @@ impl<'a> Verifier<'a> {
 mod test {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use testing::{Dir, LinkType};
+    use testing::{mistrust_build, Dir, MistrustOp};
 
+    #[cfg(target_family = "unix")]
+    use testing::LinkType;
+
+    #[cfg(target_family = "unix")]
     #[test]
     fn simple_cases() {
         let d = Dir::new();
@@ -804,12 +836,11 @@ mod test {
         d.chmod("e/f", 0o777);
         d.link_rel(LinkType::Dir, "a/b/c", "d");
 
-        let m = Mistrust::builder()
-            .trust_no_group_id()
-            // Ignore the permissions on /tmp/whatever-tempdir-gave-us
-            .ignore_prefix(d.canonical_root())
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustNoGroupId(),
+        ]);
+
         // /a/b/c should be fine...
         m.check_directory(d.path("a/b/c")).unwrap();
         // /e/f/g should not.
@@ -836,18 +867,14 @@ mod test {
         }
 
         // With normal settings should be okay...
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[MistrustOp::IgnorePrefix(d.canonical_root())]);
         m.check_directory(d.path("a/b")).unwrap();
 
         // With admin_only, it'll fail.
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_admin_only()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustAdminOnly(),
+        ]);
 
         let err = m.check_directory(d.path("a/b")).unwrap_err();
         assert!(matches!(err, Error::BadOwner(_, _)));
@@ -862,11 +889,10 @@ mod test {
         d.chmod("a", 0o700);
         d.chmod("b", 0o600);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_no_group_id()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustNoGroupId(),
+        ]);
 
         // If we insist stuff is its own type, it works fine.
         m.verifier().require_directory().check(d.path("a")).unwrap();
@@ -888,6 +914,7 @@ mod test {
         // TODO: Possibly, make sure that a special file matches neither.
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn readable_ok() {
         let d = Dir::new();
@@ -897,11 +924,10 @@ mod test {
         d.chmod("a/b", 0o750);
         d.chmod("a/b/c", 0o640);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_no_group_id()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustNoGroupId(),
+        ]);
 
         // These will fail, since the file or directory is readable.
         let e = m.verifier().check(d.path("a/b")).unwrap_err();
@@ -919,6 +945,7 @@ mod test {
             .unwrap();
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn multiple_errors() {
         let d = Dir::new();
@@ -926,11 +953,10 @@ mod test {
         d.chmod("a", 0o700);
         d.chmod("a/b", 0o700);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_no_group_id()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustNoGroupId(),
+        ]);
 
         // Only one error occurs, so we get that error.
         let e = m
@@ -964,10 +990,7 @@ mod test {
         d.chmod("a/b", 0o755);
         d.chmod("a/b/c", 0o700);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[MistrustOp::IgnorePrefix(d.canonical_root())]);
 
         // `a` is world-writable, so the first check will fail.
         m.check_directory(d.path("a/b/c")).unwrap_err();
@@ -993,11 +1016,10 @@ mod test {
         d.chmod("a", 0o770);
         d.chmod("a/b", 0o770);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_no_group_id()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustNoGroupId(),
+        ]);
 
         // By default, we shouldn't be accept this directory, since it is
         // group-writable.
@@ -1007,20 +1029,19 @@ mod test {
         // But we can make the group trusted, which will make it okay for the
         // directory to be group-writable.
         let gid = d.path("a/b").metadata().unwrap().gid();
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_group(gid)
-            .build()
-            .unwrap();
+
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustGroup(gid),
+        ]);
 
         m.check_directory(d.path("a/b")).unwrap();
 
         // OTOH, if we made a _different_ group trusted, it'll fail.
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .trust_group(gid ^ 1)
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[
+            MistrustOp::IgnorePrefix(d.canonical_root()),
+            MistrustOp::TrustGroup(gid ^ 1),
+        ]);
 
         let e = m.check_directory(d.path("a/b")).unwrap_err();
         assert!(matches!(e, Error::BadPermission(..)));
@@ -1031,10 +1052,7 @@ mod test {
         let d = Dir::new();
         d.dir("a/b");
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[MistrustOp::IgnorePrefix(d.canonical_root())]);
 
         #[cfg(target_family = "unix")]
         {
@@ -1058,6 +1076,7 @@ mod test {
         m.make_directory(d.path("a/b/c/d")).unwrap();
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn check_contents() {
         let d = Dir::new();
@@ -1068,10 +1087,7 @@ mod test {
         d.chmod("a/b/c", 0o755);
         d.chmod("a/b/c/d", 0o666);
 
-        let m = Mistrust::builder()
-            .ignore_prefix(d.canonical_root())
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[MistrustOp::IgnorePrefix(d.canonical_root())]);
 
         // A check should work...
         m.check_directory(d.path("a/b")).unwrap();
@@ -1100,10 +1116,7 @@ mod test {
         d.chmod("a/b/c", 0o777);
         d.chmod("a/b/c/d", 0o666);
 
-        let m = Mistrust::builder()
-            .dangerously_trust_everyone()
-            .build()
-            .unwrap();
+        let m = mistrust_build(&[MistrustOp::DangerouslyTrustEveryone()]);
 
         // This is fine.
         m.check_directory(d.path("a/b/c")).unwrap();
