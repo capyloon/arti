@@ -286,7 +286,7 @@ fn main() -> Result<()> {
         .about("A simple benchmarking utility for Arti.")
         .arg(
             Arg::with_name("arti-config")
-                .short("c")
+                .short('c')
                 .long("arti-config")
                 .takes_value(true)
                 .required(true)
@@ -297,7 +297,7 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("num-samples")
-                .short("s")
+                .short('s')
                 .long("num-samples")
                 .takes_value(true)
                 .required(true)
@@ -307,7 +307,7 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("num-streams")
-                .short("p")
+                .short('p')
                 .long("streams")
                 .aliases(&["num-parallel"])
                 .takes_value(true)
@@ -318,7 +318,7 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("num-circuits")
-                .short("C")
+                .short('C')
                 .long("num-circuits")
                 .takes_value(true)
                 .required(false)
@@ -328,14 +328,14 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("output")
-                .short("o")
+                .short('o')
                 .takes_value(true)
                 .value_name("/path/to/output.json")
                 .help("A path to write benchmark results to, in JSON format.")
         )
         .arg(
             Arg::with_name("download-bytes")
-                .short("d")
+                .short('d')
                 .long("download-bytes")
                 .takes_value(true)
                 .required(true)
@@ -345,7 +345,7 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("upload-bytes")
-                .short("u")
+                .short('u')
                 .long("upload-bytes")
                 .takes_value(true)
                 .required(true)
