@@ -19,8 +19,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+pub use tor_chanmgr::{ChannelConfig, ChannelConfigBuilder};
 pub use tor_config::impl_standard_builder;
-pub use tor_config::{CfgPath, CfgPathError, ConfigBuildError, Reconfigure};
+pub use tor_config::{CfgPath, CfgPathError, ConfigBuildError, ConfigurationSource, Reconfigure};
 
 /// Types for configuring how Tor circuits are built.
 pub mod circ {
@@ -264,7 +265,12 @@ pub struct TorClientConfig {
         )
     )]
     #[builder_field_attr(serde(default))]
-    override_net_params: tor_netdoc::doc::netstatus::NetParams<i32>,
+    pub(crate) override_net_params: tor_netdoc::doc::netstatus::NetParams<i32>,
+
+    /// Information about how to build paths through the network.
+    #[builder(sub_builder)]
+    #[builder_field_attr(serde(default))]
+    pub(crate) channel: ChannelConfig,
 
     /// Information about how to build paths through the network.
     #[as_ref]
@@ -372,9 +378,15 @@ impl TorClientConfigBuilder {
     }
 }
 
-/// Return a filename for the default user configuration file.
-pub fn default_config_file() -> Result<PathBuf, CfgPathError> {
-    CfgPath::new("${ARTI_CONFIG}/arti.toml".into()).path()
+/// Return the filenames for the default user configuration files
+pub fn default_config_files() -> Result<Vec<ConfigurationSource>, CfgPathError> {
+    ["${ARTI_CONFIG}/arti.toml", "${ARTI_CONFIG}/arti.d/"]
+        .into_iter()
+        .map(|f| {
+            let path = CfgPath::new(f.into()).path()?;
+            Ok(ConfigurationSource::from_path(path))
+        })
+        .collect()
 }
 
 /// The environment variable we look at when deciding whether to disable FS permissions checking.
@@ -455,7 +467,9 @@ mod test {
         // We don't want to second-guess the directories crate too much
         // here, so we'll just make sure it does _something_ plausible.
 
-        let dflt = default_config_file().unwrap();
-        assert!(dflt.ends_with("arti.toml"));
+        let dflt = default_config_files().unwrap();
+        assert!(dflt[0].as_path().ends_with("arti.toml"));
+        assert!(dflt[1].as_path().ends_with("arti.d"));
+        assert_eq!(dflt.len(), 2);
     }
 }

@@ -10,7 +10,7 @@ use futures::task::SpawnExt;
 use safelog::sensitive;
 use std::io::Result as IoResult;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use arti_client::{ErrorKind, HasKind, StreamPrefs, TorClient};
 use tor_rtcompat::{Runtime, TcpListener};
@@ -46,7 +46,8 @@ See <a href="https://gitlab.torproject.org/tpo/core/arti/#todo-need-to-change-wh
 
 /// Find out which kind of address family we can/should use for a
 /// given `SocksRequest`.
-pub fn stream_preference(req: &SocksRequest, addr: &str) -> StreamPrefs {
+#[cfg_attr(feature = "experimental-api", visibility::make(pub))]
+fn stream_preference(req: &SocksRequest, addr: &str) -> StreamPrefs {
     let mut prefs = StreamPrefs::new();
     if addr.parse::<Ipv4Addr>().is_ok() {
         // If they asked for an IPv4 address correctly, nothing else will do.
@@ -164,7 +165,7 @@ where
     // Unpack the socks request and find out where we're connecting to.
     let addr = request.addr().to_string();
     let port = request.port();
-    info!(
+    debug!(
         "Got a socks request: {} {}:{}",
         request.command(),
         sensitive(&addr),
@@ -194,7 +195,7 @@ where
                 Err(e) => return reply_error(&mut socks_w, &request, e).await,
             };
             // Okay, great! We have a connection over the Tor network.
-            info!("Got a stream for {}:{}", sensitive(&addr), port);
+            debug!("Got a stream for {}:{}", sensitive(&addr), port);
 
             // Send back a SOCKS response, telling the client that it
             // successfully connected.
@@ -410,7 +411,8 @@ fn accept_err_is_fatal(err: &IoError) -> bool {
 /// Requires a `runtime` to use for launching tasks and handling
 /// timeouts, and a `tor_client` to use in connecting over the Tor
 /// network.
-pub async fn run_socks_proxy<R: Runtime>(
+#[cfg_attr(feature = "experimental-api", visibility::make(pub))]
+pub(crate) async fn run_socks_proxy<R: Runtime>(
     runtime: R,
     tor_client: TorClient<R>,
     socks_port: u16,
@@ -423,12 +425,14 @@ pub async fn run_socks_proxy<R: Runtime>(
     // Try to bind to the SOCKS ports.
     for localhost in &localhosts {
         let addr: SocketAddr = (*localhost, socks_port).into();
+        // NOTE: Our logs here displays the local address. We allow this, since
+        // knowing the address is basically essential for diagnostics.
         match runtime.listen(&addr).await {
             Ok(listener) => {
                 info!("Listening on {:?}.", addr);
                 listeners.push(listener);
             }
-            Err(e) => warn!("Can't listen on {:?}: {}", addr, e),
+            Err(e) => warn!("Can't listen on {}: {}", addr, e),
         }
     }
     // We weren't able to bind any ports: There's nothing to do.

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use tor_bytes::Reader;
-use tor_linkspec::{ChanTarget, OwnedChanTarget};
+use tor_linkspec::{ChanTarget, OwnedChanTarget, RelayIds};
 use tor_llcrypto as ll;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 use tor_llcrypto::pk::rsa::RsaIdentity;
@@ -31,8 +31,7 @@ use super::CellFrame;
 use tracing::{debug, trace};
 
 /// A list of the link protocols that we support.
-// We only support version 4 for now, since we don't do padding right.
-static LINK_PROTOCOLS: &[u16] = &[4];
+static LINK_PROTOCOLS: &[u16] = &[4, 5];
 
 /// A raw client channel on which nothing has been done.
 pub struct OutboundClientHandshake<
@@ -504,15 +503,17 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
         // We do this _last_, since "this is the wrong peer" is
         // usually a different situation than "this peer couldn't even
         // identify itself right."
-        if peer.ed_identity() != identity_key {
-            return Err(Error::HandshakeProto(
-                "Peer ed25519 id not as expected".into(),
-            ));
-        }
 
-        if *peer.rsa_identity() != rsa_id {
-            return Err(Error::HandshakeProto("Peer RSA id not as expected".into()));
-        }
+        // TODO: We'll need a different constructor if there are someday
+        // more/different identity keys.
+        let actual_identity = RelayIds::new(*identity_key, rsa_id);
+
+        // We enforce that the relay proved that it has every ID that we wanted:
+        // it may also have additional IDs that we didn't ask for.
+        match super::check_id_match_helper(&actual_identity, peer) {
+            Err(Error::ChanMismatch(msg)) => Err(Error::HandshakeProto(msg)),
+            other => other,
+        }?;
 
         // If we reach this point, the clock skew might be may now be considered
         // authenticated: The certificates are what we wanted, and everything
@@ -596,6 +597,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Verif
 pub(super) mod test {
     #![allow(clippy::unwrap_used)]
     use hex_literal::hex;
+    use regex::Regex;
     use std::time::{Duration, SystemTime};
 
     use super::*;
@@ -652,7 +654,7 @@ pub(super) mod test {
             let handshake = OutboundClientHandshake::new(mb, None, rt.clone());
             let unverified = handshake.connect(|| now).await?;
 
-            assert_eq!(unverified.link_protocol, 4);
+            assert_eq!(unverified.link_protocol, 5);
             // No timestamp in the NETINFO, so no skew.
             assert_eq!(unverified.clock_skew(), ClockSkew::None);
 
@@ -804,22 +806,6 @@ pub(super) mod test {
         }
     }
 
-    struct DummyChanTarget {
-        ed: Ed25519Identity,
-        rsa: RsaIdentity,
-    }
-    impl ChanTarget for DummyChanTarget {
-        fn addrs(&self) -> &[SocketAddr] {
-            &[]
-        }
-        fn ed_identity(&self) -> &Ed25519Identity {
-            &self.ed
-        }
-        fn rsa_identity(&self) -> &RsaIdentity {
-            &self.rsa
-        }
-    }
-
     // Timestamp when the example certificates were all valid.
     fn cert_timestamp() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::new(1601143280, 0)
@@ -839,7 +825,7 @@ pub(super) mod test {
         let unver = make_unverified(certs, runtime.clone());
         let ed = Ed25519Identity::from_bytes(peer_ed).unwrap();
         let rsa = RsaIdentity::from_bytes(peer_rsa).unwrap();
-        let chan = DummyChanTarget { ed, rsa };
+        let chan = OwnedChanTarget::new(Vec::new(), ed, rsa);
         unver.check_internal(&chan, peer_cert_sha256, when)
     }
 
@@ -942,10 +928,10 @@ pub(super) mod test {
         .err()
         .unwrap();
 
-        assert_eq!(
-            format!("{}", err),
-            "Handshake protocol violation: Peer ed25519 id not as expected"
-        );
+        let re = Regex::new(
+            r"Identity .* does not match target ed25519:EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA",
+        ).unwrap();
+        assert!(re.is_match(&format!("{}", err)));
 
         let err = certs_test(
             certs.clone(),
@@ -958,10 +944,11 @@ pub(super) mod test {
         .err()
         .unwrap();
 
-        assert_eq!(
-            format!("{}", err),
-            "Handshake protocol violation: Peer RSA id not as expected"
-        );
+        let re = Regex::new(
+            r"Identity .* does not match target \$9999999999999999999999999999999999999999",
+        )
+        .unwrap();
+        assert!(re.is_match(&format!("{}", err)));
 
         let err = certs_test(
             certs,

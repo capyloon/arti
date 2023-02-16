@@ -1,8 +1,222 @@
 ### Notes
 
 This file describes changes in Arti through the current release.  Once Arti
-is more mature, and we start to version crates independently, we may
-switch to using a separate changelog for each crate.
+is more mature, we may switch to using a separate changelog for each crate.
+
+
+# Arti 1.0.0 — 1 September 2022
+
+Arti 1.0.0 adds a final set of security features, clears up some
+portability bugs, and addresses numerous other issues.
+
+With this release, we are now ready to declare Arti *stable*: we are
+relatively confident that Arti has the security features that it
+needs for usage via the `arti` command-line proxy, or embedding via
+the `arti-client` API.
+
+In our next releases, we will focus on adding anticensorship
+features similar to C tor, including support for connecting via
+bridges and pluggable transports.
+
+
+### Breaking changes
+
+- Most of the APIs in the [`arti`] crate—the one providing our
+  binary—are now hidden behind an `experimental-api` feature, to mark
+  that they are unstable and unsupported.  If you need to embed `arti`
+  in your application, please use the [`arti-client`] crate instead.
+  ([#530], [!664])
+- The `default_config_file` function has been replaced with
+  `default_config_files`, since we now have both a default directory and a
+  default file. ([!682])
+
+### Breaking changes in lower-level crates
+
+- New `params()` method in the [`NetDirProvider`] trait, to expose the
+  latest parameters even when we don't have a complete directory.
+  ([#528], [!658])
+- Large refactoring on the traits that represent a relay's set
+  of identities, to better support more identity types in the future,
+  and to make sure we can support bridges with unknown Ed25519
+  identities when we implement them. ([#428], [!662])
+- Require that our `TcpStream` types implement `Send`. ([!675])
+
+### New features
+
+- Arti now implements Tor's channel padding feature, to make
+  [netflow logs] less useful for traffic analysis. ([#62], [!657])
+- Use [`zeroize`] more consistently across our code base. This tool
+  clears various sensitive objects before they get dropped, for
+  defense-in-depth against memory exposure. ([#254], [!655])
+- Provide a "process hardening" feature (on by default) that uses
+  [`secmem_proc`] to prevent low-privileged processes from inspecting
+  our memory or our monitoring our execution. This is another
+  defense-in-depth mechanism.  ([#364], [!672])
+- Arti now rejects attempts to run as root.  You can override this with
+  with `application.allow_running_as_root`. ([#523], [!688])
+- Arti now rejects attempts to run in a setuid environment: this is not
+  something we support. ([#523], [!689], [!691])
+- We now support having an `arti.d` directory full of `.toml`
+  configuration files, to be read in sorted order. ([#271], [#474],
+  [#544], [!682], [!697])
+- On Unix-like platforms, we now reload our configuration file when we
+  receive a `HUP` signal.  ([#316], [!702])
+
+### Major bugfixes
+
+- Numerous fixes to our [`fs-mistrust`] crate for Android and iOS,
+  including some that prevented it from building or working correctly.
+  ([!667])
+- The [`fs-mistrust`] crate now handles Windows prefixes correctly.
+  Previously, it would try to read `C:`, and fail. ([!698])
+
+### Infrastructure
+
+- The `check_licenses` tool now works with the latest version of
+  `cargo-license`. ([!674])
+- Our continuous integration configuration now has support for building and
+  testing Arti on Windows. ([#450], [!705])
+
+### Documentation
+
+- Our documentation is now much more careful about listing which Cargo
+  features are required for any optional items. ([#541], [!681], [!706])
+- Better documentation about our API stability and overall
+  design. ([#522], [#531])
+- Better documentation on the `DONE` stream-close condition. ([!677])
+
+### Cleanups, minor features, and minor bugfixes
+
+- The `dns_port` and `socks_port` options have been renamed to
+  `dns_listen` and `socks_listen`. They now support multiple
+  addresses. Backward compatibility with the old options is
+  retained. ([#502], [!602])
+- Renamed `.inc` files to end with `.rs`, to help analysis
+  tools. ([#381], [!645])
+- Backend support for some cell types that we'll need down the road when
+  we implement onion services. ([!651], [!648])
+- Switch to the once-again-maintained main branch of [`shellexpand`].
+  ([!661])
+- Use less storage on disk for descriptors, by expiring them more
+  aggressively. ([#527], [!669])
+- Backend support for RTT estimation, as needed for congestion-based
+  flow-control. ([!525])
+- Running as a DNS proxy can now be disabled at compile-time, by
+  turning off the `dns-proxy` feature. ([#532])
+- When a circuit fails for a reason that was not the fault of the
+  Tor network, we no longer count it against our total number of
+  permitted circuit failures. ([#517], [!676])
+- Tests for older configuration file formats. ([!684])
+- Our default log messages have been cleaned up a bit, to make them
+  more useful. ([!692], [0f133de6b90e799d], [e8fcf2b0383f49a6])
+- We use [`safelog`] in more places, to avoid logging information that
+  could be useful if the logs were stolen or accidentally
+  leaked. ([!687], [!693])
+- Fix a race condition that could prevent us from noticing multiple
+  configuration changes in rapid succession. ([#544],
+  [a7bb3a73b4dfb0e8])
+- Better errors on invalid escapes in our configuration files. (In toml,
+  you can't say `"C:\Users"`; you have to escape it as `"C:\\Users"`.
+  We now try to explain this.) ([#549], [!695])
+- Improve reliability of a `fs-mistrust` test. ([!699])
+- Various tests have been adjusted to work on Windows, or disabled on Windows
+  because they were checking for Unix-only features.  ([#450], [#557],
+  [!696], [!701])
+- When displaying filenames in logs or error messages, we try to
+  replace the user's home directory with `${HOME}` or `%UserProfile%` as
+  appropriate, to reduce the frequency with which the username appears
+  in the logs. ([#555], [!700])
+
+### Testing
+
+- Lengthen a timeout in a `tor-rtcompat` test, to make it more reliable.
+  ([#515], [!644])
+
+### Acknowledgments
+
+Thanks to everyone who has contributed to this release, including
+Alexander Færøy, Arturo Marquez, Dimitris Apostolou, Emptycup, FAMASoon,
+Trinity Pointard, and Yuan Lyu.
+
+Also, our deep thanks to [Zcash Community Grants] for funding the development
+of Arti 1.0.0!
+
+[!525]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/525
+[!602]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/602
+[!644]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/644
+[!645]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/645
+[!648]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/648
+[!651]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/651
+[!655]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/655
+[!657]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/657
+[!658]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/658
+[!661]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/661
+[!662]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/662
+[!664]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/664
+[!667]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/667
+[!669]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/669
+[!672]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/672
+[!674]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/674
+[!675]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/675
+[!676]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/676
+[!677]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/677
+[!681]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/681
+[!682]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/682
+[!684]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/684
+[!687]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/687
+[!688]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/688
+[!689]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/689
+[!691]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/691
+[!692]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/692
+[!693]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/693
+[!695]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/695
+[!696]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/696
+[!697]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/697
+[!698]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/698
+[!699]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/699
+[!700]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/700
+[!701]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/701
+[!702]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/702
+[!705]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/705
+[!706]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/706
+[#62]: https://gitlab.torproject.org/tpo/core/arti/-/issues/62
+[#254]: https://gitlab.torproject.org/tpo/core/arti/-/issues/254
+[#271]: https://gitlab.torproject.org/tpo/core/arti/-/issues/271
+[#316]: https://gitlab.torproject.org/tpo/core/arti/-/issues/316
+[#364]: https://gitlab.torproject.org/tpo/core/arti/-/issues/364
+[#381]: https://gitlab.torproject.org/tpo/core/arti/-/issues/381
+[#428]: https://gitlab.torproject.org/tpo/core/arti/-/issues/428
+[#450]: https://gitlab.torproject.org/tpo/core/arti/-/issues/450
+[#474]: https://gitlab.torproject.org/tpo/core/arti/-/issues/474
+[#502]: https://gitlab.torproject.org/tpo/core/arti/-/issues/502
+[#515]: https://gitlab.torproject.org/tpo/core/arti/-/issues/515
+[#517]: https://gitlab.torproject.org/tpo/core/arti/-/issues/517
+[#522]: https://gitlab.torproject.org/tpo/core/arti/-/issues/522
+[#523]: https://gitlab.torproject.org/tpo/core/arti/-/issues/523
+[#527]: https://gitlab.torproject.org/tpo/core/arti/-/issues/527
+[#528]: https://gitlab.torproject.org/tpo/core/arti/-/issues/528
+[#530]: https://gitlab.torproject.org/tpo/core/arti/-/issues/530
+[#531]: https://gitlab.torproject.org/tpo/core/arti/-/issues/531
+[#532]: https://gitlab.torproject.org/tpo/core/arti/-/issues/532
+[#541]: https://gitlab.torproject.org/tpo/core/arti/-/issues/541
+[#544]: https://gitlab.torproject.org/tpo/core/arti/-/issues/544
+[#549]: https://gitlab.torproject.org/tpo/core/arti/-/issues/549
+[#555]: https://gitlab.torproject.org/tpo/core/arti/-/issues/555
+[#557]: https://gitlab.torproject.org/tpo/core/arti/-/issues/557
+[0f133de6b90e799d]: https://gitlab.torproject.org/tpo/core/arti/-/commit/0f133de6b90e799d37fdcd9dc75f9f94acb6bb6c
+[a7bb3a73b4dfb0e8]: https://gitlab.torproject.org/tpo/core/arti/-/commit/a7bb3a73b4dfb0e8e0f36994de3d31389d4997b9
+[e8fcf2b0383f49a6]: https://gitlab.torproject.org/tpo/core/arti/-/commit/e8fcf2b0383f49a6d927cb094fdc00f766e82580
+[`NetDirProvider`]: https://tpo.pages.torproject.net/core/doc/rust/tor_netdir/trait.NetDirProvider.html
+[`arti-client`]: https://tpo.pages.torproject.net/core/doc/rust/arti_client/index.html
+[`arti`]: https://tpo.pages.torproject.net/core/doc/rust/arti/index.html
+[`fs-mistrust`]: https://tpo.pages.torproject.net/core/doc/rust/fs_mistrust/index.html
+[`safelog`]: https://tpo.pages.torproject.net/core/doc/rust/safelog/index.html
+[`secmem_proc`]: https://crates.io/crates/secmem-proc
+[`shellexpand`]: https://crates.io/crates/shellexpand
+[`zeroize`]: https://crates.io/crates/zeroize
+[netflow logs]: https://en.wikipedia.org/wiki/NetFlow
+[Zcash Community Grants]: https://zcashcommunitygrants.org/
+
 
 
 # Arti 0.6.0 — 1 August 2022

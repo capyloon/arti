@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
 //! `tor-bytes`: Utilities to decode/encode things into bytes.
 //!
 //! # Overview
@@ -86,10 +87,12 @@
 mod err;
 mod impls;
 mod reader;
+mod secretbuf;
 mod writer;
 
 pub use err::{EncodeError, Error};
 pub use reader::Reader;
+pub use secretbuf::SecretBuf;
 pub use writer::Writer;
 
 use arrayref::array_ref;

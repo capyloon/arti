@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use futures::task::SpawnError;
 
+use safelog::Sensitive;
 use thiserror::Error;
 use tor_circmgr::TargetPorts;
 use tor_error::{ErrorKind, HasKind};
@@ -105,6 +106,7 @@ pub_if_error_detail! {
 /// [`kind`](`tor_error::HasKind::kind`) trait method to distinguish among
 /// different kinds of [`Error`](crate::Error).  If that doesn't provide enough information
 /// for your use case, please let us know.
+#[cfg_attr(docsrs, doc(cfg(feature = "error_detail")))]
 #[derive(Error, Clone, Debug)]
 #[non_exhaustive]
 enum ErrorDetail {
@@ -131,7 +133,7 @@ enum ErrorDetail {
     #[error("Failed to obtain exit circuit for ports {exit_ports}")]
     ObtainExitCircuit {
         /// The ports that we wanted a circuit for.
-        exit_ports: TargetPorts,
+        exit_ports: Sensitive<TargetPorts>,
 
         /// What went wrong
         #[source]

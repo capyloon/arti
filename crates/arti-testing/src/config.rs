@@ -8,7 +8,7 @@ use clap::{App, AppSettings, Arg, SubCommand};
 use std::str::FromStr;
 use std::time::Duration;
 
-use tor_config::ConfigurationSources;
+use tor_config::{ConfigurationSource, ConfigurationSources};
 
 /// Helper: parse an optional string as a number of seconds.
 fn int_str_to_secs(s: Option<&str>) -> Result<Option<Duration>> {
@@ -28,7 +28,7 @@ pub(crate) fn parse_cmdline() -> Result<Job> {
         .usage("arti-testing <SUBCOMMAND> [OPTIONS]")
         .arg(
             Arg::with_name("config-files")
-                .short("c")
+                .short('c')
                 .long("config")
                 .takes_value(true)
                 .value_name("FILE")
@@ -37,7 +37,7 @@ pub(crate) fn parse_cmdline() -> Result<Job> {
         )
         .arg(
             Arg::with_name("option")
-                .short("o")
+                .short('o')
                 .takes_value(true)
                 .value_name("KEY=VALUE")
                 .multiple(true)
@@ -45,7 +45,7 @@ pub(crate) fn parse_cmdline() -> Result<Job> {
         )
         .arg(
             Arg::with_name("log")
-                .short("l")
+                .short('l')
                 .long("log")
                 .takes_value(true)
                 .value_name("FILTER")
@@ -134,7 +134,12 @@ pub(crate) fn parse_cmdline() -> Result<Job> {
             // Maybe change this later on if we decide it's silly.
             return Err(anyhow!("Sorry, you need to give me a configuration file."));
         } else {
-            config_files.for_each(|f| cfg_sources.push_file(f));
+            config_files.for_each(|f| {
+                cfg_sources.push_source(
+                    ConfigurationSource::from_path(f),
+                    tor_config::sources::MustRead::MustRead,
+                );
+            });
         }
 
         matches
