@@ -1,9 +1,9 @@
 [package]
 name = "tor-congestion"
-version = "0.3.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["The Tor Project, Inc.", "eta <eta@torproject.org>"]
-rust-version = "1.56"
+rust-version = "1.60"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Implementations of Tor network congestion control algorithms"
@@ -13,9 +13,9 @@ repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
 
 [dependencies]
 thiserror = "1"
-tor-error = { path = "../tor-error", version = "0.3.2" }
-tor-netdir = { path = "../tor-netdir", version = "0.6.0" }
-tor-units = { path = "../tor-units", version = "0.3.1"}
+tor-error = { path = "../tor-error", version = "0.4.1" }
+tor-netdir = { path = "../tor-netdir", version = "0.7.1" }
+tor-units = { path = "../tor-units", version = "0.4.1" }
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

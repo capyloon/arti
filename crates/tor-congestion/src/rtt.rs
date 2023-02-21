@@ -250,6 +250,16 @@ impl RoundtripTimeEstimator {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::print_stderr)]
 mod test {
+    // @@ begin test lint list maintained by maint/add_warning @@
+    #![allow(clippy::bool_assert_comparison)]
+    #![allow(clippy::clone_on_copy)]
+    #![allow(clippy::dbg_macro)]
+    #![allow(clippy::print_stderr)]
+    #![allow(clippy::print_stdout)]
+    #![allow(clippy::single_char_pattern)]
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unchecked_duration_subtraction)]
+    //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
     use crate::rtt::RoundtripTimeEstimator;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -380,7 +390,12 @@ mod test {
         }
     }
 
+    // TODO RTT: this test is disabled for now because it does not work on
+    // platforms where the granularity of Duration is greater than 1 nanosecond.
+    //
+    // See #574 for more information.
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore)]
     fn rtt_test_vectors() {
         let (mut estimator, _) = make_estimator();
         let now = Instant::now();

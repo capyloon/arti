@@ -35,6 +35,16 @@ maint-checks:
     - apt-get update && apt-get install -y python3-toml python-is-python3
     - ./maint/check_toposort
     - ./maint/add_warning --check
+
+# non-blocking for now, see
+#      https://gitlab.torproject.org/tpo/core/arti/-/issues/581
+#      https://gitlab.torproject.org/tpo/core/arti/-/issues/601
+doc-features:
+  stage: check
+  image: debian:stable-slim
+  allow_failure: true
+  script:
+    - apt-get update && apt-get install -y python3-toml python-is-python3
     - ./maint/check_doc_features
 
 rust-checks:
@@ -67,10 +77,12 @@ rust-latest:
     - rustup show
     - cargo clippy --all-features --all-targets -- --cfg ci_arti_stable -D warnings
     - cargo build --verbose --release -p arti-bench --target x86_64-unknown-linux-gnu
+  after_script:
+    - ./maint/preserve target/x86_64-unknown-linux-gnu/debug/arti target/x86_64-unknown-linux-gnu/release/arti-bench
+    - cargo clean
   artifacts:
     paths:
-      - target/x86_64-unknown-linux-gnu/debug/arti
-      - target/x86_64-unknown-linux-gnu/release/arti-bench
+      - artifacts
     expire_in: 1 hours
   tags:
     - amd64
@@ -82,12 +94,20 @@ rust-latest-async-std-rustls:
     - rustup show
     - rustup component add clippy
     - cd crates/arti-client && cargo clippy --no-default-features --features=async-std,rustls
+  after_script:
+    - cargo clean
   tags:
     - amd64
 
 rust-nightly:
   stage: test
   image: rustlang/rust:nightly
+  # In case there is a bug in rust:nightly, you can instead pin an older
+  # version of the Docker image until that bug is fixed.  To find the
+  # SHA256 ID of the last working version of nightly, look at the logs
+  # from the last successful CI run.  Here is an example of how to do so:
+  #
+  # image: rustlang/rust@sha256:415b7c22ab4a8a3ec3efc9cc8d7b018964f0c6757fff27bbd110e0ed92566321
   allow_failure: true
   script:
     - rustup show
@@ -102,6 +122,8 @@ rust-nightly:
     - (echo; cat clippy-nightly.toml) >>clippy.toml
     - cargo clippy --all-features --tests -- --cfg ci_arti_nightly -D clippy::dbg_macro -D clippy::print_stdout -D clippy::print_stderr
     - RUSTDOCFLAGS="-Dwarnings --cfg docsrs" cargo doc --all-features --document-private-items --no-deps
+  after_script:
+    - cargo clean
   tags:
     - amd64
 
@@ -111,10 +133,12 @@ coverage:
   script:
     - apt-get update && apt-get install -y python3-pip python3-setuptools
     - pip3 install beautifulsoup4 lxml
-    - rustup component add llvm-tools-preview
+    - rustup component add llvm-tools
     - ./maint/via-cargo-install-in-ci grcov
     # Generate report
     - ./maint/with_coverage -f cobertura -o coverage.xml cargo test --verbose --all-features
+  after_script:
+    - cargo clean
   cache:
     paths:
       - grcov
@@ -128,12 +152,14 @@ coverage:
 
 minimal-versions:
   stage: test
-  image: rust:1.56
+  image: rust:1.60
   script:
     - rustup install nightly
     - ./maint/downgrade_dependencies
     - cargo build --verbose --target x86_64-unknown-linux-gnu --all-features
     - cargo test --verbose --target x86_64-unknown-linux-gnu --all-features
+  after_script:
+    - cargo clean
   tags:
     - amd64
 
@@ -143,10 +169,11 @@ build-repro:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG != null
   stage: build
   # If you upgrade this image, also change the one in docker_reproducible_build
-  image: rust:1.59.0-alpine3.15
+  image: rust:1.63.0-alpine3.16
   script:
     - apk add bash
     - ./maint/reproducible_build linux windows macos
+  # no after_script:, we don't build in the project dir
   artifacts:
     paths:
       - arti-linux
@@ -160,10 +187,11 @@ build-repro:
     - tpa
     - amd64
 
-integration:
+integration-chutney:
   stage: test
   image: debian:stable-slim
   script:
+    - ./maint/preserve -u
     - apt update
     - apt install -y tor git python3 curl dnsutils
     - ./tests/chutney/setup proxy
@@ -177,6 +205,109 @@ integration:
   tags:
     - amd64
 
+integration-shadow:
+  variables:
+    JOB_SHADOW_REPO: "https://github.com/shadow/shadow.git"
+    JOB_SHADOW_BRANCH: "main"
+    JOB_SHADOW_COMMIT: "v2.3.0"
+
+    JOB_TGEN_REPO: "https://github.com/shadow/tgen.git"
+    JOB_TGEN_BRANCH: "main"
+    JOB_TGEN_COMMIT: "v1.1.1"
+  stage: test
+  cache:
+    - key: $CI_JOB_NAME-shadow-$JOB_SHADOW_COMMIT
+      paths:
+      - opt/shadow
+    - key: $CI_JOB_NAME-tgen-$JOB_TGEN_COMMIT
+      paths:
+      - opt/tgen
+  image: debian:11-slim
+  script:
+    - ./maint/preserve -u
+    - ./maint/ci_log_span start "shadow_install_deps[collapsed=true]" "Installing shadow and tgen"
+    # We're going to install binaries to $HOME/.local/bin
+    - 'export PATH=$HOME/.local/bin:$PATH'
+
+    - apt-get update
+    - apt-get install -y git tor stow
+    - mkdir -p ~/src
+    - mkdir -p ~/.local
+
+    # Build shadow
+    - |
+      if [ -f opt/shadow/bin/shadow ]
+      then
+        echo "Using shadow binary from cache"
+      else
+        echo "Building shadow"
+        git clone --shallow-since=2021-08-01 -b $JOB_SHADOW_BRANCH $JOB_SHADOW_REPO ~/src/shadow
+        pushd ~/src/shadow
+        git checkout $JOB_SHADOW_COMMIT
+        export CC=gcc CXX=g++ CONTAINER=debian:11-slim BUILDTYPE=release RUSTPROFILE=minimal
+        ci/container_scripts/install_deps.sh
+        ci/container_scripts/install_extra_deps.sh
+        export PATH="$HOME/.cargo/bin:${PATH}"
+        ./setup build --jobs $(nproc) --prefix $CI_PROJECT_DIR/opt/shadow
+        ./setup install
+        popd
+      fi
+    - apt-get install -y libglib2.0-0
+    - stow -d opt -t $HOME/.local shadow
+
+    # Build tgen
+    - |
+      if [ -f opt/tgen/bin/tgen ]
+      then
+        echo "Using tgen binary from cache"
+      else
+        echo "Building tgen"
+        git clone --shallow-since=2022-01-01 -b $JOB_TGEN_BRANCH $JOB_TGEN_REPO ~/src/tgen
+        pushd ~/src/tgen
+        git checkout $JOB_TGEN_COMMIT
+        apt-get install -y cmake gcc libglib2.0-0 libglib2.0-dev libigraph-dev make
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_INSTALL_PREFIX=$CI_PROJECT_DIR/opt/tgen
+        make --jobs $(nproc)
+        make install
+        popd
+      fi
+    - apt-get install -y libigraph1 libglib2.0-0
+    - stow -d opt -t $HOME/.local tgen
+
+    # Ensure newly installed executables can be found
+    - hash -r
+
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+    - ./maint/ci_log_span end "shadow_install_deps"
+
+    # Run tests
+    - pushd tests/shadow
+    - ./run.sh
+  artifacts:
+    paths:
+      - tests/shadow
+    when: always
+    expire_in: 1 week
+  tags:
+    - amd64
+    - tpa
+
+matrix-test:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y python3-toml python-is-python3
+    - ./maint/matrix_test
+
+matrix-test-cfg:
+  stage: test
+  image: rust:latest
+  script:
+    - ./maint/matrix_test_cfg
+
+
 coverage-aggregated:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
@@ -187,11 +318,13 @@ coverage-aggregated:
     - apt update && apt install -y tor python3 python3-pip python3-setuptools curl
     # install deps for report generation
     - pip3 install beautifulsoup4 lxml
-    - rustup component add llvm-tools-preview
+    - rustup component add llvm-tools
     - cp grcov $CARGO_HOME/bin/ || cargo install grcov
     - cp $CARGO_HOME/bin/grcov .
     # Generate report
     - ./maint/coverage all
+  after_script:
+    - cargo clean
   cache:
     paths:
       - grcov
@@ -200,6 +333,16 @@ coverage-aggregated:
       - coverage
   tags:
     - amd64
+
+check-targets:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  stage: test
+  image: rust:latest
+  script:
+    - ./maint/cargo_check_target -il
+  after_script:
+    - cargo clean
 
 pages:
   rules:

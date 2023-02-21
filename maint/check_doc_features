@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 import os
 from list_crates import crate_list
@@ -17,6 +17,13 @@ additional_provided['tor-rtcompat'] = [
     ('PreferredRuntime', 'all(feature = "rustls", not(feature = "native-tls"))'),
     ('PreferredRuntime', 'feature = "native-tls"'),
     ('PreferredRuntime', 'all(feature = "rustls", not(feature = "native-tls"))'),
+    ('NativeTlsProvider', 'all(feature = "native-tls", any(feature = "tokio", feature = "async-std"))'),
+    ('RustlsProvider', 'all(feature = "rustls", any(feature = "tokio", feature = "async-std"))'),
+]
+
+# We're not very interested in the testing feature
+additional_provided['tor-guardmgr'] = [
+    ('TestConfig', 'any(test, feature = "testing")'),
 ]
 
 # Sha1 is present both ways

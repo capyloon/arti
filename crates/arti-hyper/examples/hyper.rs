@@ -4,15 +4,28 @@
 #![allow(clippy::dbg_macro)]
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
+#![allow(clippy::single_char_pattern)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::unchecked_duration_subtraction)]
 //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
+
+#![allow(clippy::uninlined_format_args)]
 
 use arti_hyper::*;
 
 use anyhow::Result;
 use arti_client::{TorClient, TorClientConfig};
 use hyper::Body;
-use tls_api::{TlsConnector, TlsConnectorBuilder};
+use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder};
+
+// On apple-darwin targets there is an issue with the native and rustls
+// tls implementation so this makes it fall back to the openssl variant.
+//
+// https://gitlab.torproject.org/tpo/core/arti/-/issues/715
+#[cfg(not(target_vendor = "apple"))]
+use tls_api_native_tls::TlsConnector;
+#[cfg(target_vendor = "apple")]
+use tls_api_openssl::TlsConnector;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,7 +52,7 @@ async fn main() -> Result<()> {
     // (This takes a while to gather the necessary consensus state, etc.)
     let tor_client = TorClient::create_bootstrapped(config).await?;
 
-    let tls_connector = tls_api_native_tls::TlsConnector::builder()?.build()?;
+    let tls_connector = TlsConnector::builder()?.build()?;
 
     // The `ArtiHttpConnector` lets us make HTTP requests via the Tor network.
     let tor_connector = ArtiHttpConnector::new(tor_client, tls_connector);

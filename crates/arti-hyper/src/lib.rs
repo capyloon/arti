@@ -1,14 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
-//! High-level layer for making http(s) requests the Tor network as a client.
-//!
-//! This can be used by applications which embed Arti,
-//! and could also be used as an example of how to build on top of [`arti_client`].
-//!
-//! There is an example program [`hyper.rs`] which uses `arti-hyper`
-//! to connect to Tor and make a single HTTP\[S] request.
-//!
-//! [`hyper.rs`]: <https://gitlab.torproject.org/tpo/core/arti/-/blob/main/crates/arti-hyper/examples/hyper.rs>
-
+#![doc = include_str!("../README.md")]
 // @@ begin lint list maintained by maint/add_warning @@
 #![cfg_attr(not(ci_arti_stable), allow(renamed_and_removed_lints))]
 #![cfg_attr(not(ci_arti_nightly), allow(unknown_lints))]
@@ -42,7 +33,9 @@
 #![warn(clippy::unseparated_literal_suffix)]
 #![deny(clippy::unwrap_used)]
 #![allow(clippy::let_unit_value)] // This can reasonably be done for explicitness
+#![allow(clippy::uninlined_format_args)]
 #![allow(clippy::significant_drop_in_scrutinee)] // arti/-/merge_requests/588/#note_2812945
+#![allow(clippy::result_large_err)] // temporary workaround for arti#587
 //! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 
 use std::future::Future;
@@ -59,7 +52,7 @@ use hyper::http::Uri;
 use hyper::service::Service;
 use pin_project::pin_project;
 use thiserror::Error;
-use tls_api::TlsConnector as TlsConn; // This is different from tor_rtompat::TlsConnector
+use tls_api::TlsConnector as TlsConn; // This is different from tor_rtcompat::TlsConnector
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tor_rtcompat::Runtime;
 
@@ -292,6 +285,16 @@ impl<R: Runtime, TC: TlsConn> Service<Uri> for ArtiHttpConnector<R, TC> {
 
 #[cfg(test)]
 mod test {
+    // @@ begin test lint list maintained by maint/add_warning @@
+    #![allow(clippy::bool_assert_comparison)]
+    #![allow(clippy::clone_on_copy)]
+    #![allow(clippy::dbg_macro)]
+    #![allow(clippy::print_stderr)]
+    #![allow(clippy::print_stdout)]
+    #![allow(clippy::single_char_pattern)]
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unchecked_duration_subtraction)]
+    //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
     use super::*;
 
     fn make_uri(url: &str) -> Uri {
