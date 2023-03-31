@@ -1,6 +1,6 @@
 [package]
 name = "tor-netdir"
-version = "0.7.1"
+version = "0.8.1"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
 rust-version = "1.60"
@@ -14,29 +14,30 @@ repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
 [features]
 default = []
 
-experimental = ["experimental-api", "onion-service", "onion-client"]
+experimental = ["experimental-api", "hs-service", "hs-client"]
 
 # Enable experimental APIs that are not yet officially supported.
 #
 # These APIs are not covered by semantic versioning.  Using this
 # feature voids your "semver warrantee".
 experimental-api = []
-onion-client = ["onion-common"]
-onion-service = ["onion-common"]
-onion-common = ["digest", "time", "tor-hscrypto"]
+hs-client = ["hs-common"]
+hs-service = ["hs-common"]
+hs-common = ["digest", "time", "tor-hscrypto"]
 
 # Enable testing-only APIs.  APIs under this feature are not
 # covered by semver.
 testing = ["hex", "tor-netdoc/build_docs"]
 
 [dependencies]
-bitflags = "1"
+bitflags = "2"
 derive_builder = { version = "0.11.2", package = "derive_builder_fork_arti" }
 derive_more = "0.99.3"
 digest = { version = "0.10.0", optional = true }
 futures = "0.3.14"
 hex = { version = "0.4", optional = true }
 humantime = "2"
+itertools = "0.10.1"
 num_enum = "0.5"
 rand = "0.8"
 serde = { version = "1.0.103", features = ["derive"] }
@@ -45,24 +46,25 @@ static_assertions = "1"
 strum = { version = "0.24", features = ["derive"] }
 thiserror = "1"
 time = { version = "0.3.17", features = ["macros"], optional = true }
-tor-checkable = { path = "../tor-checkable", version = "0.4.0" }
-tor-config = { path = "../tor-config", version = "0.7.1" }
+tor-checkable = { path = "../tor-checkable", version = "0.4.2" }
+tor-config = { path = "../tor-config", version = "0.8.0" }
 tor-error = { path = "../tor-error", version = "0.4.1" }
-tor-hscrypto = { path = "../tor-hscrypto", version = "0.1.0", optional = true }
-tor-linkspec = { path = "../tor-linkspec", version = "0.6.0" }
-tor-llcrypto = { path = "../tor-llcrypto", version = "0.4.1" }
-tor-netdoc = { path = "../tor-netdoc", version = "0.6.1" }
-tor-protover = { path = "../tor-protover", version = "0.4.0" }
-tor-units = { path = "../tor-units", version = "0.4.1" }
+tor-hscrypto = { path = "../tor-hscrypto", version = "0.1.2", optional = true }
+tor-linkspec = { path = "../tor-linkspec", version = "0.6.3" }
+tor-llcrypto = { path = "../tor-llcrypto", version = "0.4.3" }
+tor-netdoc = { path = "../tor-netdoc", version = "0.6.3" }
+tor-protover = { path = "../tor-protover", version = "0.4.2" }
+tor-units = { path = "../tor-units", version = "0.5.0" }
 tracing = "0.1.18"
+typed-index-collections = "3.1"
 
 [dev-dependencies]
 float_eq = "1.0.0"
 hex = "0.4"
 hex-literal = "0.3"
 rand_chacha = "0.3"
-tor-basic-utils = { path = "../tor-basic-utils", version = "0.5.0" }
-tor-netdoc = { path = "../tor-netdoc", version = "0.6.1", features = ["build_docs"] }
+tor-basic-utils = { path = "../tor-basic-utils", version = "0.6.0" }
+tor-netdoc = { path = "../tor-netdoc", version = "0.6.3", features = ["build_docs"] }
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

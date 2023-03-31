@@ -21,7 +21,7 @@ conditions.
 The following section is **not** an exhaustive guide, and only covers common
 setup and development tasks.
 
-**Install dependencies**
+**Install build dependencies**
 
 You'll need to have a working Rust environment to build the code, and a
 working Git installation to fetch the code. Additionally, please install
@@ -42,6 +42,17 @@ the SQLite 3 development files and shellcheck to successfully run git hooks.
   
 - For git hooks: [shellcheck](https://github.com/koalaman/shellcheck#installing)
   (used in [`maint/shellcheck_all`](./maint/shellcheck_all))
+
+**(Optional) install development dependencies**
+
+TL;DR: `./maint/check_env`
+
+If you plan to run scripts inside the `maint/` directory, that are scripts
+such as coverage reports, you'll need a few more dependencies. For this,
+please execute `./maint/check_env`, which will check your host machine if
+all required dependencies are satisfied. If this is not the case, it will
+report the missing ones. Keep in mind that this list is pretty comprehensive
+and not every script requires all of these dependencies.
 
 **Clone the source code**
 
@@ -107,6 +118,16 @@ link to your forked arti repository at:
 >
 >      https://gitlab.torproject.org/_name_/arti/-/merge_requests
 
+We prefer not to rebase and squash MRs during the review cycle,
+so if you want to make changes to your MR, please add new commits rather than squashing.
+You can use the
+[`fixup!`](https://git-scm.com/docs/git-rebase#Documentation/git-rebase.txt---autosquash)
+(or `squash!`)
+[autosquash](https://thoughtbot.com/blog/autosquashing-git-commits)
+syntax if it seems best;
+this is a good idea if the un-fixed state breaks the tests or is otherwise broken,
+but is not needed otherwise.
+
 ## Where are some good places to start hacking?
 
 You might want to begin by looking around the
@@ -124,8 +145,19 @@ Improvements or bugfixes to the existing code would be great.
 
 Improving the look and feel of the documentation would also rock.
 
-I've made a bunch of notes throughout the document in comments with strings
+We've made a bunch of notes throughout the document in comments with strings
 like "FIXME" or "TODO".
+
+When we have TODOs that we want to fix prior to the release of a particular
+feature or milestone, we define a special TODO format.
+Right now we have "TODO HS" (or "TODO hs") for things we intend to fix
+before we release support for Tor Hidden Services (.onion services).
+
+If you want to make a temporary change that ought *definitely* not to be merged,
+mark it with <code>XX&#88;</code>.
+This will be spotted by the CI, preventing a mistaken merge.
+<!-- that's X X X with no spaces.  Putting it here literally would fail CI :-) -->
+
 
 There is a list of features that I wish other crates had in a file called
 `WANT_FROM_OTHER_CRATES`.

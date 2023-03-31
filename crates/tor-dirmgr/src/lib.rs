@@ -74,7 +74,7 @@ pub use retry::{DownloadSchedule, DownloadScheduleBuilder};
 use scopeguard::ScopeGuard;
 use tor_circmgr::CircMgr;
 use tor_dirclient::SourceInfo;
-use tor_error::into_internal;
+use tor_error::{into_internal, ErrorReport};
 use tor_netdir::params::NetParameters;
 use tor_netdir::{DirEvent, MdReceiver, NetDir, NetDirProvider};
 
@@ -497,7 +497,10 @@ impl<R: Runtime> DirMgr<R> {
                 {
                     match e {
                         Error::ManagerDropped => {}
-                        _ => warn!("Unrecovered error while waiting for bootstrap: {}", e),
+                        _ => warn!(
+                            "Unrecovered error while waiting for bootstrap: {}",
+                            e.report()
+                        ),
                     }
                 } else if let Err(e) =
                     Self::download_forever(dirmgr_weak.clone(), &mut schedule, attempt_id, sender)
@@ -505,7 +508,7 @@ impl<R: Runtime> DirMgr<R> {
                 {
                     match e {
                         Error::ManagerDropped => {}
-                        _ => warn!("Unrecovered error while downloading: {}", e),
+                        _ => warn!("Unrecovered error while downloading: {}", e.report()),
                     }
                 }
             })
@@ -669,7 +672,7 @@ impl<R: Runtime> DirMgr<R> {
                 if let Err(err) = outcome {
                     if state.is_ready(Readiness::Usable) {
                         usable = true;
-                        info!("Unable to completely download a directory: {}.  Nevertheless, the directory is usable, so we'll pause for now.", err);
+                        info!("Unable to completely download a directory: {}.  Nevertheless, the directory is usable, so we'll pause for now.", err.report());
                         break 'retry_attempt;
                     }
 
@@ -687,7 +690,8 @@ impl<R: Runtime> DirMgr<R> {
                     let delay = retry_delay.next_delay(&mut rand::thread_rng());
                     warn!(
                         "Unable to download a usable directory: {}.  We will restart in {:?}.",
-                        err, delay
+                        err.report(),
+                        delay,
                     );
                     {
                         let dirmgr = upgrade_weak_ref(&weak)?;
@@ -1048,10 +1052,12 @@ impl<R: Runtime> DirMgr<R> {
                     self.events.publish(DirEvent::NewDescriptors);
 
                     info!("Marked consensus usable.");
-                    store.mark_consensus_usable(consensus_meta)?;
-                    // Now that a consensus is usable, older consensuses may
-                    // need to expire.
-                    store.expire_all(&crate::storage::EXPIRATION_DEFAULTS)?;
+                    if !store.is_readonly() {
+                        store.mark_consensus_usable(consensus_meta)?;
+                        // Now that a consensus is usable, older consensuses may
+                        // need to expire.
+                        store.expire_all(&crate::storage::EXPIRATION_DEFAULTS)?;
+                    }
                     Ok(())
                 }
                 NetDirChange::AddMicrodescs(mds) => {

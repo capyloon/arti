@@ -50,10 +50,11 @@ mod build;
 
 use crate::doc::authcert::{AuthCert, AuthCertKeyIds};
 use crate::parse::keyword::Keyword;
-use crate::parse::parser::{Section, SectionRules};
+use crate::parse::parser::{Section, SectionRules, SectionRulesBuilder};
 use crate::parse::tokenize::{Item, ItemResult, NetDocReader};
 use crate::types::misc::*;
 use crate::util::private::Sealed;
+use crate::util::PeekableIterator;
 use crate::{Error, ParseErrorKind as EK, Pos, Result};
 use std::collections::{HashMap, HashSet};
 use std::{net, result, time};
@@ -443,6 +444,7 @@ bitflags! {
     /// they are not listed in this type.
     ///
     /// The bit values used to represent the flags have no meaning.
+    #[derive(Clone, Copy, Debug)]
     pub struct RelayFlags: u16 {
         /// Is this a directory authority?
         const AUTHORITY = (1<<0);
@@ -598,6 +600,9 @@ pub struct Consensus<RS> {
     voters: Vec<ConsensusVoterInfo>,
     /// A list of routerstatus entries for the relays on the network,
     /// with one entry per relay.
+    ///
+    /// These are currently ordered by the router's RSA identity, but this is not
+    /// to be relied on, since we may want to even abolish RSA at some point!
     #[cfg_attr(docsrs, doc(cfg(feature = "dangerous-expose-struct-fields")))]
     relays: Vec<RS>,
     /// Footer for the consensus object.
@@ -736,9 +741,9 @@ decl_keyword! {
 }
 
 /// Shared parts of rules for all kinds of netstatus headers
-static NS_HEADER_RULES_COMMON_: Lazy<SectionRules<NetstatusKwd>> = Lazy::new(|| {
+static NS_HEADER_RULES_COMMON_: Lazy<SectionRulesBuilder<NetstatusKwd>> = Lazy::new(|| {
     use NetstatusKwd::*;
-    let mut rules = SectionRules::new();
+    let mut rules = SectionRules::builder();
     rules.add(NETWORK_STATUS_VERSION.rule().required().args(1..=2));
     rules.add(VOTE_STATUS.rule().required().args(1..));
     rules.add(VALID_AFTER.rule().required());
@@ -763,7 +768,7 @@ static NS_HEADER_RULES_CONSENSUS: Lazy<SectionRules<NetstatusKwd>> = Lazy::new(|
     rules.add(SHARED_RAND_PREVIOUS_VALUE.rule().args(2..));
     rules.add(SHARED_RAND_CURRENT_VALUE.rule().args(2..));
     rules.add(UNRECOGNIZED.rule().may_repeat().obj_optional());
-    rules
+    rules.build()
 });
 /*
 /// Rules for parsing the header of a vote.
@@ -797,17 +802,17 @@ static NS_VOTERINFO_RULES_VOTE: SectionRules<NetstatusKwd> = {
 /// Rules for parsing a single voter's information in a consensus
 static NS_VOTERINFO_RULES_CONSENSUS: Lazy<SectionRules<NetstatusKwd>> = Lazy::new(|| {
     use NetstatusKwd::*;
-    let mut rules = SectionRules::new();
+    let mut rules = SectionRules::builder();
     rules.add(DIR_SOURCE.rule().required().args(6..));
     rules.add(CONTACT.rule().required());
     rules.add(VOTE_DIGEST.rule().required());
     rules.add(UNRECOGNIZED.rule().may_repeat().obj_optional());
-    rules
+    rules.build()
 });
 /// Shared rules for parsing a single routerstatus
-static NS_ROUTERSTATUS_RULES_COMMON_: Lazy<SectionRules<NetstatusKwd>> = Lazy::new(|| {
+static NS_ROUTERSTATUS_RULES_COMMON_: Lazy<SectionRulesBuilder<NetstatusKwd>> = Lazy::new(|| {
     use NetstatusKwd::*;
-    let mut rules = SectionRules::new();
+    let mut rules = SectionRules::builder();
     rules.add(RS_A.rule().may_repeat().args(1..));
     rules.add(RS_S.rule().required());
     rules.add(RS_V.rule());
@@ -823,7 +828,7 @@ static NS_ROUTERSTATUS_RULES_NSCON: Lazy<SectionRules<NetstatusKwd>> = Lazy::new
     use NetstatusKwd::*;
     let mut rules = NS_ROUTERSTATUS_RULES_COMMON_.clone();
     rules.add(RS_R.rule().required().args(8..));
-    rules
+    rules.build()
 });
 
 /*
@@ -843,17 +848,17 @@ static NS_ROUTERSTATUS_RULES_MDCON: Lazy<SectionRules<NetstatusKwd>> = Lazy::new
     let mut rules = NS_ROUTERSTATUS_RULES_COMMON_.clone();
     rules.add(RS_R.rule().required().args(6..));
     rules.add(RS_M.rule().required().args(1..));
-    rules
+    rules.build()
 });
 /// Rules for parsing consensus fields from a footer.
 static NS_FOOTER_RULES: Lazy<SectionRules<NetstatusKwd>> = Lazy::new(|| {
     use NetstatusKwd::*;
-    let mut rules = SectionRules::new();
+    let mut rules = SectionRules::builder();
     rules.add(DIRECTORY_FOOTER.rule().required().no_args());
     // consensus only
     rules.add(BANDWIDTH_WEIGHTS.rule());
     rules.add(UNRECOGNIZED.rule().may_repeat().obj_optional());
-    rules
+    rules.build()
 });
 
 impl ProtoStatus {
@@ -1351,7 +1356,7 @@ impl<RS: RouterStatus + ParseRouterStatus> Consensus<RS> {
     ) -> Result<Option<ConsensusVoterInfo>> {
         use NetstatusKwd::*;
 
-        match r.iter().peek() {
+        match r.peek() {
             None => return Ok(None),
             Some(e) if e.is_ok_with_kwd_in(&[RS_R, DIRECTORY_FOOTER]) => return Ok(None),
             _ => (),
@@ -1393,7 +1398,7 @@ impl<RS: RouterStatus + ParseRouterStatus> Consensus<RS> {
     /// out of routerstatus entries.
     fn take_routerstatus(r: &mut NetDocReader<'_, NetstatusKwd>) -> Result<Option<(Pos, RS)>> {
         use NetstatusKwd::*;
-        match r.iter().peek() {
+        match r.peek() {
             None => return Ok(None),
             Some(e) if e.is_ok_with_kwd_in(&[DIRECTORY_FOOTER]) => return Ok(None),
             _ => (),
@@ -1480,7 +1485,7 @@ impl<RS: RouterStatus + ParseRouterStatus> Consensus<RS> {
         // Find the signatures.
         let mut first_sig: Option<Item<'_, NetstatusKwd>> = None;
         let mut signatures = Vec::new();
-        for item in r.iter() {
+        for item in &mut *r {
             let item = item?;
             if item.kwd() != DIRECTORY_SIGNATURE {
                 return Err(EK::UnexpectedToken
@@ -1921,9 +1926,8 @@ mod test {
 
     fn gettok(s: &str) -> Result<Item<'_, NetstatusKwd>> {
         let mut reader = NetDocReader::new(s);
-        let it = reader.iter();
-        let tok = it.next().unwrap();
-        assert!(it.next().is_none());
+        let tok = reader.next().unwrap();
+        assert!(reader.next().is_none());
         tok
     }
 

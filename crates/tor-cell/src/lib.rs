@@ -41,6 +41,8 @@
 pub mod chancell;
 mod err;
 pub mod relaycell;
+pub mod restrict;
+mod slicewriter;
 
 pub use err::Error;
 
