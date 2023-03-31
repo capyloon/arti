@@ -182,7 +182,7 @@ mod ed25519_impls {
         fn take_from(b: &mut Reader<'_>) -> Result<Self> {
             let bytes = b.take(32)?;
             Self::from_bytes(array_ref![bytes, 0, 32])
-                .map_err(|_| Error::BadMessage("Couldn't decode Ed25519 public key"))
+                .map_err(|_| Error::InvalidMessage("Couldn't decode Ed25519 public key".into()))
         }
     }
 
@@ -208,7 +208,7 @@ mod ed25519_impls {
         fn take_from(b: &mut Reader<'_>) -> Result<Self> {
             let bytes = b.take(64)?;
             Self::from_bytes(array_ref![bytes, 0, 64])
-                .map_err(|_| Error::BadMessage("Couldn't decode Ed25519 signature."))
+                .map_err(|_| Error::InvalidMessage("Couldn't decode Ed25519 signature.".into()))
         }
     }
 }
@@ -294,6 +294,24 @@ mod u8_array_impls {
             let mut array = [0_u8; N];
             r.take_into(&mut array[..])?;
             Ok(array)
+        }
+    }
+}
+
+/// Implement Readable and Writeable for `CtByteArray`
+mod ctbytearray_impls {
+    use super::*;
+    use tor_llcrypto::util::ct::CtByteArray;
+    impl<const N: usize> Writeable for CtByteArray<N> {
+        fn write_onto<B: Writer + ?Sized>(&self, b: &mut B) -> EncodeResult<()> {
+            b.write_all(&self.as_ref()[..]);
+            Ok(())
+        }
+    }
+
+    impl<const N: usize> Readable for CtByteArray<N> {
+        fn take_from(r: &mut Reader<'_>) -> Result<Self> {
+            Ok(CtByteArray::from(r.extract::<[u8; N]>()?))
         }
     }
 }

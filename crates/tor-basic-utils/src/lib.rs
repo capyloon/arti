@@ -42,7 +42,6 @@ use std::collections::BinaryHeap;
 use std::fmt;
 use std::mem;
 
-pub mod futures;
 pub mod iter;
 pub mod n_key_set;
 pub mod retry;
@@ -77,6 +76,27 @@ pub fn skip_fmt<T>(_: &T, f: &mut fmt::Formatter) -> fmt::Result {
     }
     inner(f)
 }
+
+// ----------------------------------------------------------------------
+
+/// Extension trait to provide `.strip_suffix_ignore_ascii_case()` etc.
+// Using `.as_ref()` as a supertrait lets us make the method a provided one.
+pub trait StrExt: AsRef<str> {
+    /// Like `str.strip_suffix()` but ASCII-case-insensitive
+    fn strip_suffix_ignore_ascii_case(&self, suffix: &str) -> Option<&str> {
+        let whole = self.as_ref();
+        let suffix_start = whole.len().checked_sub(suffix.len())?;
+        whole[suffix_start..]
+            .eq_ignore_ascii_case(suffix)
+            .then(|| &whole[..suffix_start])
+    }
+
+    /// Like `str.ends_with()` but ASCII-case-insensitive
+    fn ends_with_ignore_ascii_case(&self, suffix: &str) -> bool {
+        self.strip_suffix_ignore_ascii_case(suffix).is_some()
+    }
+}
+impl StrExt for str {}
 
 // ----------------------------------------------------------------------
 
@@ -324,3 +344,31 @@ macro_rules! derive_serde_raw { {
         $($body)*
     }
 } }
+
+// ----------------------------------------------------------------------
+
+#[cfg(test)]
+mod test {
+    // @@ begin test lint list maintained by maint/add_warning @@
+    #![allow(clippy::bool_assert_comparison)]
+    #![allow(clippy::clone_on_copy)]
+    #![allow(clippy::dbg_macro)]
+    #![allow(clippy::print_stderr)]
+    #![allow(clippy::print_stdout)]
+    #![allow(clippy::single_char_pattern)]
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unchecked_duration_subtraction)]
+    //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
+    use super::*;
+
+    #[test]
+    fn test_strip_suffix_ignore_ascii_case() {
+        assert_eq!(
+            "hi there".strip_suffix_ignore_ascii_case("THERE"),
+            Some("hi ")
+        );
+        assert_eq!("hi here".strip_suffix_ignore_ascii_case("THERE"), None);
+        assert_eq!("THERE".strip_suffix_ignore_ascii_case("there"), Some(""));
+        assert_eq!("hi".strip_suffix_ignore_ascii_case("THERE"), None);
+    }
+}

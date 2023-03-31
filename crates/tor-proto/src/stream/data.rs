@@ -3,6 +3,7 @@
 
 use crate::{Error, Result};
 use tor_cell::relaycell::msg::EndReason;
+use tor_cell::relaycell::RelayCmd;
 
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
@@ -14,6 +15,7 @@ use tokio_crate::io::ReadBuf;
 use tokio_crate::io::{AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite};
 #[cfg(feature = "tokio")]
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
+use tor_cell::restricted_msg;
 
 use std::fmt::Debug;
 use std::io::Result as IoResult;
@@ -21,11 +23,16 @@ use std::pin::Pin;
 
 use educe::Educe;
 
+#[cfg(feature = "experimental-api")]
+use crate::circuit::ClientCirc;
+
 use crate::circuit::StreamTarget;
 use crate::stream::StreamReader;
 use tor_basic_utils::skip_fmt;
-use tor_cell::relaycell::msg::{Data, RelayMsg};
+use tor_cell::relaycell::msg::Data;
 use tor_error::internal;
+
+use super::AnyCmdChecker;
 
 /// An anonymized stream over the Tor network.
 ///
@@ -96,6 +103,13 @@ pub struct DataStream {
     w: DataWriter,
     /// Underlying reader for this stream
     r: DataReader,
+    /// A handle for the underlying circuit.
+    ///
+    /// TODO: This is redundant with the reference in `StreamTarget` inside
+    /// DataWriterState, but for now we can't actually access that state all the time,
+    /// since it might be inside a boxed future.
+    #[cfg(feature = "experimental-api")]
+    circuit: ClientCirc,
 }
 
 /// The write half of a [`DataStream`], implementing [`futures::io::AsyncWrite`].
@@ -149,12 +163,22 @@ pub struct DataReader {
     state: Option<DataReaderState>,
 }
 
+restricted_msg! {
+    /// An allowable incoming message on a data stream.
+    enum DataStreamMsg:RelayMsg {
+        // SENDME is handled by the reactor.
+        Data, End, Connected,
+    }
+}
+
 impl DataStream {
     /// Wrap raw stream reader and target parts as a DataStream.
     ///
     /// For non-optimistic stream, function `wait_for_connection`
     /// must be called after to make sure CONNECTED is received.
     pub(crate) fn new(reader: StreamReader, target: StreamTarget) -> Self {
+        #[cfg(feature = "experimental-api")]
+        let circuit = target.circuit().clone();
         let r = DataReader {
             state: Some(DataReaderState::Ready(DataReaderImpl {
                 s: reader,
@@ -170,7 +194,12 @@ impl DataStream {
                 n_pending: 0,
             })),
         };
-        DataStream { w, r }
+        DataStream {
+            w,
+            r,
+            #[cfg(feature = "experimental-api")]
+            circuit,
+        }
     }
 
     /// Divide this DataStream into its constituent parts.
@@ -204,6 +233,18 @@ impl DataStream {
                 state
             )))
         }
+    }
+
+    /// Return a reference to this stream's circuit?
+    ///
+    /// This is an experimental API; it is not covered by semver guarantee. It
+    /// is likely to change or disappear in a future release.
+    ///
+    /// TODO: Should there be an AttachedToCircuit trait that we use for all
+    /// client stream types?  Should this return an Option<&ClientCirc>?
+    #[cfg(feature = "experimental-api")]
+    pub fn circuit(&self) -> &ClientCirc {
+        &self.circuit
     }
 }
 
@@ -591,26 +632,43 @@ impl DataReaderImpl {
     /// This function takes ownership of self so that we can avoid
     /// self-referential lifetimes.
     async fn read_cell(mut self) -> (Self, Result<()>) {
-        let cell = self.s.recv().await;
+        use DataStreamMsg::*;
+        let msg = match self.s.recv().await {
+            Ok(unparsed) => match unparsed.decode::<DataStreamMsg>() {
+                Ok(cell) => cell.into_msg(),
+                Err(e) => {
+                    self.s.protocol_error();
+                    return (
+                        self,
+                        Err(Error::from_bytes_err(e, "message on a data stream")),
+                    );
+                }
+            },
+            Err(e) => return (self, Err(e)),
+        };
 
-        let result = match cell {
-            Ok(RelayMsg::Connected(_)) if !self.connected => {
+        let result = match msg {
+            Connected(_) if !self.connected => {
                 self.connected = true;
                 Ok(())
             }
-            Ok(RelayMsg::Data(d)) if self.connected => {
+            Connected(_) => {
+                self.s.protocol_error();
+                Err(Error::StreamProto(
+                    "Received a second connect cell on a data stream".to_string(),
+                ))
+            }
+            Data(d) if self.connected => {
                 self.add_data(d.into());
                 Ok(())
             }
-            Ok(RelayMsg::End(e)) => Err(Error::EndReceived(e.reason())),
-            Err(e) => Err(e),
-            Ok(m) => {
+            Data(_) => {
                 self.s.protocol_error();
-                Err(Error::StreamProto(format!(
-                    "Unexpected {} cell on stream",
-                    m.cmd()
-                )))
+                Err(Error::StreamProto(
+                    "Received a data cell an unconnected stream".to_string(),
+                ))
             }
+            End(e) => Err(Error::EndReceived(e.reason())),
         };
 
         (self, result)
@@ -629,5 +687,62 @@ impl DataReaderImpl {
             // future, we'll have to be careful here.
             self.pending.append(&mut d);
         }
+    }
+}
+
+/// A `CmdChecker` that enforces invariants for outbound data streams.
+#[derive(Debug, Default)]
+pub(crate) struct DataCmdChecker {
+    /// True if we have received a CONNECTED message on this stream.
+    connected_received: bool,
+}
+
+impl super::CmdChecker for DataCmdChecker {
+    fn check_msg(
+        &mut self,
+        msg: &tor_cell::relaycell::UnparsedRelayCell,
+    ) -> Result<super::StreamStatus> {
+        use super::StreamStatus::*;
+        match msg.cmd() {
+            RelayCmd::CONNECTED => {
+                if self.connected_received {
+                    Err(Error::StreamProto(
+                        "Received CONNECTED twice on a stream.".into(),
+                    ))
+                } else {
+                    self.connected_received = true;
+                    Ok(Open)
+                }
+            }
+            RelayCmd::DATA => {
+                if self.connected_received {
+                    Ok(Open)
+                } else {
+                    Err(Error::StreamProto(
+                        "Received DATA before CONNECTED on a stream".into(),
+                    ))
+                }
+            }
+            RelayCmd::END => Ok(Closed),
+            _ => Err(Error::StreamProto(format!(
+                "Unexpected {} on a data stream!",
+                msg.cmd()
+            ))),
+        }
+    }
+
+    fn consume_checked_msg(&mut self, msg: tor_cell::relaycell::UnparsedRelayCell) -> Result<()> {
+        let _ = msg
+            .decode::<DataStreamMsg>()
+            .map_err(|err| Error::from_bytes_err(err, "cell on half-closed stream"))?;
+        Ok(())
+    }
+}
+
+impl DataCmdChecker {
+    /// Return a new boxed `DataCmdChecker` in a state suitable for a newly
+    /// constructed connection.
+    pub(crate) fn new_any() -> AnyCmdChecker {
+        Box::<Self>::default()
     }
 }

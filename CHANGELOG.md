@@ -3,7 +3,321 @@
 This file describes changes in Arti through the current release.  Once Arti
 is more mature, we may switch to using a separate changelog for each crate.
 
-# Arti 1.1.1 — 1 February 2022
+# Arti 1.1.3 — 31 March 2023
+
+Arti 1.1.3 continues our work on onion services.  We can now parse all
+of the relevant message types, build circuits as needed to target
+relays, build and sign onion service descriptors, and deliver onion service
+requests to our `hsclient` code.
+
+We've also solved a few annoying bugs, made our CI more bulletproof against
+certain programming mistakes, and exposed a few APIs that had been missing
+before elsewhere in our code.
+
+### Major bugfixes
+
+- Prevent a fatal error when finding a usable consensus in a read-only
+  directory store. ([#779], [!1055])
+
+### Breaking changes in lower level crates
+
+- Moved futures-related utilities from `tor-basic-utils` to a new
+  `tor-async-utils` crate. ([!1091])
+- When the `expand-paths` Cargo feature is not enabled, we now reject
+  paths in our configuration containing unescaped `$` and `~` strings.
+  Previously we would treat them as literals, which would break
+  when `expand-paths` was provided. ([#790], [!1069])
+
+### Onion service development
+
+- We now have working implementations for all of the message types that Tor
+  uses to implement onion services. These are included in our fuzzing, and
+  are cross-validated against the C Tor implementation. ([!1038], [!1043],
+  [!1045], [!1052])
+- Our onion service descriptor parsing code now validates the inner
+  certificates embedded in the descriptors, for parity with C Tor's behavior.
+  ([#744], [!1044])
+- Refactor responsibility for HS circuit management out of `CircMgr`
+  ([!1047])
+- Revise APIs and outline implementations for the initial parts of a state
+  manager and client implementation.  ([!1034], [!1086])
+- Handle requests for `.onion` addresses by routing them to our onion service
+  code.  (This code does not yet do anything useful.) ([!1060], [!1071],
+  [!1098])
+- Our circuit implementation now has APIs needed to send special-purpose
+  messages and receive replies for them.  We'll use this to implement
+  onion service handshakes outside of the `tor-proto` module. ([!1051])
+- Implement functionality to pre-construct and launch circuits as needed for
+  onion service directory, introduction, and rendezvous
+  communications. ([#691], [!1065])
+- Implement code to construct, encrypt, and sign onion service
+  descriptors. ([#745], [!1070], [!1084])
+- More work on usable APIs for HSDir ring. ([!1095])
+
+### Infrastructure
+
+- Add a new `check_env` script to detect whether the environment is set
+  up correctly to build Arti. ([!1030])
+- We have the beginnings of a `fixup-features` tool, to make sure that our
+  "full" and "experimental" Cargo features behave in the way we expect,
+  and eventually to enable us to use [`cargo-semver-checks`] on our
+  non-experimental features only.  This tool is not yet ready for
+  use; its semantics are subtly wrong. ([#771], [!1059])
+- Our CI scripts now rejects merges containing the string
+  "XX<!-- look, a squirrel -->XX";
+  we use this string to indicate places where the code must be fixed
+  before it can be merged. ([#782], [!1067])
+
+### Testing
+
+- More of our tests now specify times using [`humantime`] (rather than as
+  a number of seconds since the Unix epoch). ([!1037])
+- Our fuzzers now compile again.
+  ([53e44b58f5fa0cfa], [!1063])
+
+### Documentation
+
+- New example code for building a `BridgeConfig` and launching a TorClient
+  with bridges, without having a config file. ([#791], [!1074])
+
+
+### Cleanups, minor features, and minor bugfixes
+
+- Our `caret` macro now works correctly for uninhabited
+  enumerations. ([841905948f913f73])
+- Defend against possible misuse of [`tor_bytes::Reader::extract_n`].
+  This wasn't a security hole, but could have become one in the
+  future. ([!1053])
+- Do not ask exits to resolve IP addresses: we already know the IP address
+  for an IP address. ([!1057])
+- Fix a bunch of new warnings from Rust 1.68. ([!1062])
+- Expose builder for [`TransportConfigList`] as part of the public
+  API. ([455a7a710917965f])
+- Enforce use of blinded keys in places where they are required. ([!1081])
+- Add accessors for the [`Blockage`] type, so other programs can
+  ask what has gone wrong with the connection to the network. ([#800],
+  [!1088]).
+
+
+### Acknowledgments
+
+Thanks to everybody who's contributed to this release, including
+Alexander Færøy, Dimitris Apostolou, Emil Engler, Saksham Mittal, and
+Trinity Pointard. Also, our welcome to Gabi Moldovan as she joins
+the team!
+
+Also, our deep thanks to [Zcash Community Grants] for funding the
+development of Arti!
+
+
+[!1030]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1030
+[!1034]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1034
+[!1037]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1037
+[!1038]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1038
+[!1043]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1043
+[!1044]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1044
+[!1045]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1045
+[!1047]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1047
+[!1051]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1051
+[!1052]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1052
+[!1053]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1053
+[!1055]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1055
+[!1057]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1057
+[!1059]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1059
+[!1060]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1060
+[!1062]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1062
+[!1063]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1063
+[!1065]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1065
+[!1067]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1067
+[!1069]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1069
+[!1070]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1070
+[!1071]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1071
+[!1074]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1074
+[!1081]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1081
+[!1084]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1084
+[!1086]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1086
+[!1088]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1088
+[!1091]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1091
+[!1095]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1095
+[!1098]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1098
+[#691]: https://gitlab.torproject.org/tpo/core/arti/-/issues/691
+[#744]: https://gitlab.torproject.org/tpo/core/arti/-/issues/744
+[#745]: https://gitlab.torproject.org/tpo/core/arti/-/issues/745
+[#771]: https://gitlab.torproject.org/tpo/core/arti/-/issues/771
+[#779]: https://gitlab.torproject.org/tpo/core/arti/-/issues/779
+[#782]: https://gitlab.torproject.org/tpo/core/arti/-/issues/782
+[#790]: https://gitlab.torproject.org/tpo/core/arti/-/issues/790
+[#791]: https://gitlab.torproject.org/tpo/core/arti/-/issues/791
+[#800]: https://gitlab.torproject.org/tpo/core/arti/-/issues/800
+[455a7a710917965f]: https://gitlab.torproject.org/tpo/core/arti/-/commit/455a7a710917965f0b3977d4381752975184def1
+[53e44b58f5fa0cfa]: https://gitlab.torproject.org/tpo/core/arti/-/commit/53e44b58f5fa0cfa57073618d18bd71a1632afff
+[841905948f913f73]: https://gitlab.torproject.org/tpo/core/arti/-/commit/841905948f913f73b3bd9cfeeb11e8b9ab9f06ea
+[Zcash Community Grants]: https://zcashcommunitygrants.org/
+[`Blockage`]: https://tpo.pages.torproject.net/core/doc/rust/arti_client/status/struct.Blockage.html
+[`TransportConfigList`]: https://tpo.pages.torproject.net/core/doc/rust/arti_client/config/struct.TransportConfigListBuilder.html
+[`cargo-semver-checks`]: https://crates.io/crates/cargo-semver-checks
+[`humantime`]: https://crates.io/crates/humantime
+[`tor_bytes::Reader::extract_n`]: https://tpo.pages.torproject.net/core/doc/rust/tor_bytes/struct.Reader.html#method.extract_n
+
+
+
+
+
+
+# Arti 1.1.2 — 28 February 2023
+
+Arti 1.1.2 continues our work on onion services, and builds out more of
+the necessary infrastructure, focusing on backend support for the onion
+service directories.
+
+We've also done a significant revision on our handling of incoming
+messages on circuits, to avoid a fair amount of unnecessary copying, and
+defer message parsing until we're certain that the message type would be
+acceptable in a given context.  Doing this turned up several bugs, which
+are now fixed too.
+
+### Breaking changes in lower level crates
+
+- The APIs for `tor-cell` have changed significantly, to help
+  implement [#525] and prepare for [#690]. This has no downstream
+  implications outside of `tor-proto`.
+- Our [`IntegerMinutes`] type no longer has an erroneous `days()` accessor.
+  (This accessor did not work correctly, and actually returned a
+  number of minutes!) ([bb2ab7c2a3e0994bb43])
+- The [`PartialNetDir::fill_from_previous_netdir()`] function has
+  changed its argument types and semantics. ([f69d7f96ac40dda5])
+
+(Breaking changes in experimental APIs are not noted here.)
+
+### New features
+
+- We now have the facility to give a helpful "error hint" in response to
+  a given failure. Right now, we use this to improve the error message
+  given for file-system permission errors, so that it suggests either
+  changing the permissions on a directory, or suppressing the error.
+  ([#578], [#579], [!976], [!994], [!1018])
+- When we log an error message from inside our code (at "info" or higher), we
+  now make sure to log a full _error report_, including the cause of the
+  error, its cause, and so on. ([#680], [!997])
+- When receiving messages on channels, circuits, and streams, we now
+  defer parsing those messages until we know whether their types
+  are acceptable. This shrinks our attack surface, simplifies our code,
+  and makes our protocol handling less error-prone. ([#525], [!1008],
+  [!1013], [!1017])
+- We now copy relay cell bodies much less than previously. ([#7],
+  [ca3b33a1afc58b84])
+- We have support for handling link specifier types verbatim, for cases
+  when we need to use them to contact a rendezvous point or introduction
+  point without checking them. ([!1029])
+
+### Onion service development
+
+- We can now parse onion service descriptors, including all encrypted layers,
+  with support for descriptor-based client authentication. ([#744], [!999],
+  [!1015])
+- Our network directory code now supports deriving the `HsDir` directory
+  ring, to find out where onion service descriptors should be uploaded and
+  downloaded. ([#687], [!1012])
+- We've refactored our implementation of onion service message
+  extensions into a single place, to save on code and avoid type
+  confusion.  ([5521df0909ff7afa])
+- Our _internal_ onion-service Cargo features have been renamed to
+  start with `hs-*`. We're still using `onion-*` as the prefix for our
+  high-level onion-service features. ([#756], [!1033])
+
+### Infrastructure
+
+- All our shell scripts now work when `bash` is somewhere other than `/bin`.
+  ([!990])
+- Our `check_doc_features` script is now a little more reliable.
+  ([!1023])
+- Our coverage tools now perform better checks to make sure they
+  have all of their dependencies. ([#776], [!1025])
+
+### Cleanups, minor features, and bugfixes
+
+- The internal data structures in [`tor-netdir`] now use the
+  [`typed_index_collections`] crate to ensure that the indices for one
+  list are not mis-used as indices into another. ([!1004])
+- We no longer reject authority certificates that contain an unrecognized
+  keyword. ([#752], [266c61f7213dbec7])
+- Our [`tor-netdoc`] parsing code now requires the caller to specify
+  handling for unrecognized keywords explicitly, to avoid future instances
+  of bug [#752]. ([!1006])
+- Several internal APIs and patterns in [`tor-netdoc`] have been streamlined.
+  ([#760], [!1016], [!1021])
+- Make extension-handling code in for onion service message decoding more
+  generic, since we'll reuse it a lot. ([!1020])
+- We now kill off circuits under more circumstances when the other side of
+  the circuit violates the protocol. ([#769], [#773], [!1026])
+- We now expire router descriptors as soon as _any_ of their internal
+  expiration times has elapsed. Previously, we expired them when _all_
+  of their expiration times had elapsed, which is incorrect. ([#772],
+  [!1022])
+- We are much more careful than previous about validating the correctness
+  of various message types on half-closed streams. Previously, we
+  had separate implementations for message validation; now, we use
+  a single object to check messages in both cases. ([#744], [!1026])
+- We now treat a `RESOLVED` message as closing a half-closed resolve stream.
+  Previously, we left the stream open. ([!1026])
+
+Thanks to everyone who has contributed to this release, including
+Dimitris Apostolou, Emil Engler, and Shady Katy.
+
+Also, our deep thanks to [Zcash Community Grants] for funding the
+development of Arti!
+
+[!976]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/976
+[!990]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/990
+[!994]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/994
+[!997]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/997
+[!999]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/999
+[!1004]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1004
+[!1006]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1006
+[!1008]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1008
+[!1012]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1012
+[!1013]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1013
+[!1015]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1015
+[!1016]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1016
+[!1017]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1017
+[!1018]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1018
+[!1020]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1020
+[!1021]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1021
+[!1022]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1022
+[!1023]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1023
+[!1025]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1025
+[!1026]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1026
+[!1029]: https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1029
+[#7]: https://gitlab.torproject.org/tpo/core/arti/-/issues/7
+[#525]: https://gitlab.torproject.org/tpo/core/arti/-/issues/525
+[#578]: https://gitlab.torproject.org/tpo/core/arti/-/issues/578
+[#579]: https://gitlab.torproject.org/tpo/core/arti/-/issues/579
+[#680]: https://gitlab.torproject.org/tpo/core/arti/-/issues/680
+[#687]: https://gitlab.torproject.org/tpo/core/arti/-/issues/687
+[#690]: https://gitlab.torproject.org/tpo/core/arti/-/issues/690
+[#744]: https://gitlab.torproject.org/tpo/core/arti/-/issues/744
+[#752]: https://gitlab.torproject.org/tpo/core/arti/-/issues/752
+[#760]: https://gitlab.torproject.org/tpo/core/arti/-/issues/760
+[#769]: https://gitlab.torproject.org/tpo/core/arti/-/issues/769
+[#772]: https://gitlab.torproject.org/tpo/core/arti/-/issues/772
+[#773]: https://gitlab.torproject.org/tpo/core/arti/-/issues/773
+[#776]: https://gitlab.torproject.org/tpo/core/arti/-/issues/776
+[266c61f7213dbec7]: https://gitlab.torproject.org/tpo/core/arti/-/commit/266c61f7213dbec7feacac256bd87329837535e2
+[5521df0909ff7afa]: https://gitlab.torproject.org/tpo/core/arti/-/commit/5521df0909ff7afa2d78304c9376861dfcf7041a
+[bb2ab7c2a3e0994bb43]: https://gitlab.torproject.org/tpo/core/arti/-/commit/bb2ab7c2a3e0994bb438188511688b5b039cae29
+[ca3b33a1afc58b84]: https://gitlab.torproject.org/tpo/core/arti/-/commit/ca3b33a1afc58b84cc7a39ea3845a82f17cee0da
+[f69d7f96ac40dda5]: https://gitlab.torproject.org/tpo/core/arti/-/commit/f69d7f96ac40dda53a8f4f6c01557195faaeff7c
+[Zcash Community Grants]: https://zcashcommunitygrants.org/
+[`IntegerMinutes`]: https://tpo.pages.torproject.net/core/doc/rust/tor_units/struct.IntegerMinutes.html
+[`PartialNetDir::fill_from_previous_netdir()`]: https://tpo.pages.torproject.net/core/doc/rust/tor_netdir/struct.PartialNetDir.html#method.fill_from_previous_netdir
+[`tor-netdir`]: https://tpo.pages.torproject.net/core/doc/rust/tor_netdir/index.html
+[`tor-netdoc`]: https://tpo.pages.torproject.net/core/doc/rust/tor_netdoc/index.html
+[`typed_index_collections`]: https://docs.rs/typed-index-collections/latest/typed_index_collections/
+
+
+
+
+# Arti 1.1.1 — 1 February 2023
 
 After months of work, we have a new release of Arti!
 Arti 1.1.1  is an incremental release, and cleans up a few issues from
@@ -1892,7 +2206,7 @@ release 0.1.0 (scheduled March 2022).
 
 - We store fewer needless fields from Tor directory documents. ([!151],
   [!165])
-- We've gone through and converted _every_ `XXXX` comment in our code (which
+- We've gone through and converted _every_ <code>XX&#88;X</code> comment in our code (which
   indicated a must-fix issue) into a ticket, or a `TODO`. ([#231])
 - Our SOCKS code is much more careful about sending error messages if
   an error occurs before the SOCKS connection succeeds. ([!189])

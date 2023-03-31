@@ -1,2 +1,1 @@
-ADDED: Sensitive::into_inner
-DEPRECATED: Sensitive::unwrap
+ADDED: impl From<T> for Redacted<T>

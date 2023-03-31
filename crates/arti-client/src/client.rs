@@ -4,18 +4,18 @@
 //! Once the client is bootstrapped, you can make anonymous
 //! connections ("streams") over the Tor network using
 //! [`TorClient::connect`].
-use crate::address::IntoTorAddr;
+use crate::address::{IntoTorAddr, ResolveInstructions, StreamInstructions};
 
 use crate::config::{ClientAddrConfig, StreamTimeoutConfig, TorClientConfig};
 use safelog::{sensitive, Sensitive};
-use tor_basic_utils::futures::{DropNotifyWatchSender, PostageWatchSenderExt};
-use tor_circmgr::isolation::Isolation;
+use tor_async_utils::{DropNotifyWatchSender, PostageWatchSenderExt};
+use tor_circmgr::isolation::{Isolation, StreamIsolation};
 use tor_circmgr::{isolation::StreamIsolationBuilder, IsolationToken, TargetPort};
 use tor_config::MutCfg;
 #[cfg(feature = "bridge-client")]
 use tor_dirmgr::bridgedesc::BridgeDescMgr;
 use tor_dirmgr::{DirMgrStore, Timeliness};
-use tor_error::{internal, Bug};
+use tor_error::{internal, Bug, ErrorReport};
 use tor_guardmgr::GuardMgr;
 use tor_netdir::{params::NetParameters, NetDirProvider};
 use tor_persist::{FsStateMgr, StateMgr};
@@ -27,6 +27,11 @@ use tor_proto::stream::{DataStream, IpVersionPreference, StreamParameters};
 ))]
 use tor_rtcompat::PreferredRuntime;
 use tor_rtcompat::{Runtime, SleepProviderExt};
+#[cfg(feature = "onion-client")]
+use {
+    tor_circmgr::hspool::HsCircPool,
+    tor_hsclient::{HsClientConnector, HsClientSecretKeys},
+};
 
 use educe::Educe;
 use futures::lock::Mutex as AsyncMutex;
@@ -92,6 +97,10 @@ pub struct TorClient<R: Runtime> {
     /// Pluggable transport manager.
     #[cfg(feature = "pt-client")]
     pt_mgr: Arc<tor_ptmgr::PtMgr<R>>,
+    /// HS client connector
+    #[allow(dead_code)] // TODO HS remove
+    #[cfg(feature = "onion-client")]
+    hsclient: HsClientConnector<R>,
     /// Guard manager
     #[cfg_attr(not(feature = "bridge-client"), allow(dead_code))]
     guardmgr: GuardMgr<R>,
@@ -169,7 +178,7 @@ pub struct StreamPrefs {
     /// Whether to return the stream optimistically.
     optimistic_stream: bool,
     /// Whether to try to make connections to onion services.
-    #[cfg(feature = "onion-client")]
+    #[cfg(feature = "hs-client")]
     #[allow(dead_code)]
     connect_to_onion_services: bool, // TODO hs: this should default to "true".
 }
@@ -337,9 +346,16 @@ impl StreamPrefs {
         self
     }
 
-    /// Return an [`Isolation`] to describe which connections might use
-    /// the same circuit as this one.
-    fn isolation(&self) -> Option<Box<dyn Isolation>> {
+    /// Return an [`Isolation`] which separates according to these `StreamPrefs` (only)
+    ///
+    /// This describes which connections or operations might use
+    /// the same circuit(s) as this one.
+    ///
+    /// Since this doesn't have access to the `TorClient`,
+    /// it doesn't separate streams which ought to be separated because of
+    /// the way their `TorClient`s are isolated.
+    /// For that, use [`TorClient::isolation`].
+    fn prefs_isolation(&self) -> Option<Box<dyn Isolation>> {
         use StreamIsolationPreference as SIP;
         match self.isolation {
             SIP::None => None,
@@ -514,6 +530,17 @@ impl<R: Runtime> TorClient<R> {
         #[cfg(feature = "bridge-client")]
         let bridge_desc_mgr = Arc::new(Mutex::new(None));
 
+        #[cfg(feature = "onion-client")]
+        let hsclient = {
+            let circpool = HsCircPool::new(&circmgr);
+
+            circpool
+                .launch_background_tasks(&runtime, &dirmgr.clone().upcast_arc())
+                .map_err(ErrorDetail::CircMgrSetup)?;
+
+            HsClientConnector::new(runtime.clone(), circpool)?
+        };
+
         runtime
             .spawn(tasks_monitor_dormant(
                 dormant_recv,
@@ -551,6 +578,8 @@ impl<R: Runtime> TorClient<R> {
             bridge_desc_mgr,
             #[cfg(feature = "pt-client")]
             pt_mgr,
+            #[cfg(feature = "onion-client")]
+            hsclient,
             guardmgr,
             statemgr,
             addrcfg: Arc::new(addr_cfg.into()),
@@ -852,6 +881,7 @@ impl<R: Runtime> TorClient<R> {
     /// Note that because Tor prefers to do DNS resolution on the remote
     /// side of the network, this function takes its address as a string.
     /// (See [`TorClient::connect()`] for more information.)
+    #[allow(clippy::missing_panics_doc)] // TODO HS remove
     pub async fn connect_with_prefs<A: IntoTorAddr>(
         &self,
         target: A,
@@ -859,14 +889,55 @@ impl<R: Runtime> TorClient<R> {
     ) -> crate::Result<DataStream> {
         let addr = target.into_tor_addr().map_err(wrap_err)?;
         addr.enforce_config(&self.addrcfg.get())?;
-        let (addr, port) = addr.into_string_and_port();
 
-        let exit_ports = [prefs.wrap_target_port(port)];
-        let circ = self
-            .get_or_launch_exit_circ(&exit_ports, prefs)
-            .await
-            .map_err(wrap_err)?;
-        debug!("Got a circuit for {}:{}", sensitive(&addr), port);
+        let (circ, addr, port) = match addr.into_stream_instructions()? {
+            StreamInstructions::Exit {
+                hostname: addr,
+                port,
+            } => {
+                let exit_ports = [prefs.wrap_target_port(port)];
+                let circ = self
+                    .get_or_launch_exit_circ(&exit_ports, prefs)
+                    .await
+                    .map_err(wrap_err)?;
+                debug!("Got a circuit for {}:{}", sensitive(&addr), port);
+                (circ, addr, port)
+            }
+
+            #[cfg(not(feature = "onion-client"))]
+            #[allow(unused_variables)] // for hostname and port
+            StreamInstructions::Hs {
+                hsid,
+                hostname,
+                port,
+            } => void::unreachable(hsid.0),
+
+            #[cfg(feature = "onion-client")]
+            #[allow(unused_variables)] // TODO HS remove
+            StreamInstructions::Hs {
+                hsid,
+                hostname,
+                port,
+            } => {
+                self.wait_for_bootstrap().await?;
+                let netdir = self.netdir(Timeliness::Timely, "connect to a hidden service")?;
+
+                let circ = self
+                    .hsclient
+                    .get_or_launch_connection(
+                        &netdir,
+                        hsid,
+                        HsClientSecretKeys::default(), // TODO HS support client auth somehow
+                        self.isolation(prefs),
+                    )
+                    .await
+                    .map_err(|cause| ErrorDetail::ObtainHsCircuit {
+                        cause,
+                        hsid: hsid.into(),
+                    })?;
+                (circ, hostname, port)
+            }
+        };
 
         let stream_future = circ.begin_stream(&addr, port, Some(prefs.stream_parameters()));
         // This timeout is needless but harmless for optimistic streams.
@@ -917,23 +988,31 @@ impl<R: Runtime> TorClient<R> {
         hostname: &str,
         prefs: &StreamPrefs,
     ) -> crate::Result<Vec<IpAddr>> {
+        // TODO This dummy port is only because `address::Host` is not pub(crate),
+        // but I see no reason why it shouldn't be?  Then `into_resolve_instructions`
+        // should be a method on `Host`, not `TorAddr`.  -Diziet.
         let addr = (hostname, 1).into_tor_addr().map_err(wrap_err)?;
         addr.enforce_config(&self.addrcfg.get()).map_err(wrap_err)?;
 
-        let circ = self.get_or_launch_exit_circ(&[], prefs).await?;
+        match addr.into_resolve_instructions()? {
+            ResolveInstructions::Exit(hostname) => {
+                let circ = self.get_or_launch_exit_circ(&[], prefs).await?;
 
-        let resolve_future = circ.resolve(hostname);
-        let addrs = self
-            .runtime
-            .timeout(self.timeoutcfg.get().resolve_timeout, resolve_future)
-            .await
-            .map_err(|_| ErrorDetail::ExitTimeout)?
-            .map_err(|cause| ErrorDetail::StreamFailed {
-                cause,
-                kind: "DNS lookup",
-            })?;
+                let resolve_future = circ.resolve(&hostname);
+                let addrs = self
+                    .runtime
+                    .timeout(self.timeoutcfg.get().resolve_timeout, resolve_future)
+                    .await
+                    .map_err(|_| ErrorDetail::ExitTimeout)?
+                    .map_err(|cause| ErrorDetail::StreamFailed {
+                        cause,
+                        kind: "DNS lookup",
+                    })?;
 
-        Ok(addrs)
+                Ok(addrs)
+            }
+            ResolveInstructions::Return(addrs) => Ok(addrs),
+        }
     }
 
     /// Perform a remote DNS reverse lookup with the provided IP address.
@@ -1024,24 +1103,14 @@ impl<R: Runtime> TorClient<R> {
         exit_ports: &[TargetPort],
         prefs: &StreamPrefs,
     ) -> StdResult<ClientCirc, ErrorDetail> {
+        // TODO HS probably this netdir ought to be made in connect_with_prefs
+        // like for StreamInstructions::Hs.
         self.wait_for_bootstrap().await?;
         let dir = self.netdir(Timeliness::Timely, "build a circuit")?;
 
-        let isolation = {
-            let mut b = StreamIsolationBuilder::new();
-            // Always consider our client_isolation.
-            b.owner_token(self.client_isolation);
-            // Consider stream isolation too, if it's set.
-            if let Some(tok) = prefs.isolation() {
-                b.stream_isolation(tok);
-            }
-            // Failure should be impossible with this builder.
-            b.build().expect("Failed to construct StreamIsolation")
-        };
-
         let circ = self
             .circmgr
-            .get_or_launch_exit(dir.as_ref().into(), exit_ports, isolation)
+            .get_or_launch_exit(dir.as_ref().into(), exit_ports, self.isolation(prefs))
             .await
             .map_err(|cause| ErrorDetail::ObtainExitCircuit {
                 cause,
@@ -1050,6 +1119,26 @@ impl<R: Runtime> TorClient<R> {
         drop(dir); // This decreases the refcount on the netdir.
 
         Ok(circ)
+    }
+
+    /// Return an overall [`Isolation`] for this `TorClient` and a `StreamPrefs`.
+    ///
+    /// This describes which operations might use
+    /// circuit(s) with this one.
+    ///
+    /// This combines isolation information from
+    /// [`StreamPrefs::prefs_isolation`]
+    /// and the `TorClient`'s isolation (eg from [`TorClient::isolated_client`]).
+    fn isolation(&self, prefs: &StreamPrefs) -> StreamIsolation {
+        let mut b = StreamIsolationBuilder::new();
+        // Always consider our client_isolation.
+        b.owner_token(self.client_isolation);
+        // Consider stream isolation too, if it's set.
+        if let Some(tok) = prefs.prefs_isolation() {
+            b.stream_isolation(tok);
+        }
+        // Failure should be impossible with this builder.
+        b.build().expect("Failed to construct StreamIsolation")
     }
 
     /// Return a current [`status::BootstrapStatus`] describing how close this client
@@ -1101,7 +1190,7 @@ async fn tasks_monitor_dormant<R: Runtime>(
 
         chanmgr
             .set_dormancy(mode.into(), netparams)
-            .unwrap_or_else(|e| error!("set dormancy: {}", e));
+            .unwrap_or_else(|e| error!("set dormancy: {}", e.report()));
 
         // IEFI simplifies handling of exceptional cases, as "never mind, then".
         #[cfg(feature = "bridge-client")]

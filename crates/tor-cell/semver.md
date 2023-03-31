@@ -1,2 +1,1 @@
-BREAKING: Deprecated CreateFast::body(), CreatedFast::into_body() methods
-MODIFIED: Added CreateFast::handshake(), CreatedFast::into_handshake() methods
+ADDED: New type for payload of an ht-ntor handshake.

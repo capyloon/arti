@@ -9,9 +9,18 @@
 // only in a single module somewhere else, it would make sense to just use the
 // underlying type.
 
+use std::fmt::{self, Debug, Display};
+use std::str::FromStr;
+
 use digest::Digest;
+use itertools::{chain, Itertools};
+use signature::Signer;
+use thiserror::Error;
+use tor_basic_utils::StrExt as _;
 use tor_llcrypto::d::Sha3_256;
+use tor_llcrypto::pk::ed25519::Ed25519PublicKey;
 use tor_llcrypto::pk::{curve25519, ed25519, keymanip};
+use tor_llcrypto::util::ct::CtByteArray;
 
 use crate::macros::{define_bytes, define_pk_keypair};
 use crate::time::TimePeriod;
@@ -23,10 +32,30 @@ define_bytes! {
 /// `${base32}.onion` address.  When expanded, it is a public key whose
 /// corresponding secret key is controlled by the onion service.
 ///
-/// Note: This is a separate type from [`OnionIdKey`] because it is about 6x
+/// `HsId`'s `Display` and `FromStr` representation is the domain name
+/// `"${base32}.onion"`.  (Without any subdomains.)
+///
+/// Note: This is a separate type from [`HsIdKey`] because it is about 6x
 /// smaller.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct OnionId([u8; 32]);
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct HsId([u8; 32]);
+}
+
+impl fmt::LowerHex for HsId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "HsId(0x")?;
+        for v in self.0.as_ref() {
+            write!(f, "{:02x}", v)?;
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
+
+impl Debug for HsId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "HsId({})", self)
+    }
 }
 
 define_pk_keypair! {
@@ -36,14 +65,14 @@ define_pk_keypair! {
 /// a `${base32}.onion` address.
 ///
 /// This key is not used to sign or validate anything on its own; instead, it is
-/// used to derive a `BlindedOnionIdKey`.
+/// used to derive a [`HsBlindIdKey`].
 ///
-/// Note: This is a separate type from [`OnionId`] because it is about 6x
+/// Note: This is a separate type from [`HsId`] because it is about 6x
 /// larger.  It is an expanded form, used for doing actual cryptography.
 //
 // NOTE: This is called the "master" key in rend-spec-v3, but we're deprecating
 // that vocabulary generally.
-pub struct OnionIdKey(ed25519::PublicKey) /
+pub struct HsIdKey(ed25519::PublicKey) /
     ///
     /// This is stored as an expanded secret key, for compatibility with the C
     /// tor implementation, and in order to support custom-generated addresses.
@@ -57,41 +86,171 @@ pub struct OnionIdKey(ed25519::PublicKey) /
     /// major drawback is that once you have found a good `a`, you can't get an
     /// `s` for it, since you presumably can't find SHA512 preimages.  And that
     /// is why we store the private key in (a,r) form.)
-    OnionIdSecretKey(ed25519::ExpandedSecretKey);
+    HsIdSecretKey(ed25519::ExpandedSecretKey);
 }
 
-impl OnionIdKey {
-    /// Return a representation of this key as an [`OnionId`].
+impl HsIdKey {
+    /// Return a representation of this key as an [`HsId`].
     ///
-    /// ([`OnionId`] is much smaller, and easier to store.)
-    pub fn id(&self) -> OnionId {
-        OnionId(self.0.to_bytes().into())
+    /// ([`HsId`] is much smaller, and easier to store.)
+    pub fn id(&self) -> HsId {
+        HsId(self.0.to_bytes().into())
     }
 }
-impl TryFrom<OnionId> for OnionIdKey {
+impl TryFrom<HsId> for HsIdKey {
     type Error = signature::Error;
 
-    fn try_from(value: OnionId) -> Result<Self, Self::Error> {
-        ed25519::PublicKey::from_bytes(value.0.as_ref()).map(OnionIdKey)
+    fn try_from(value: HsId) -> Result<Self, Self::Error> {
+        ed25519::PublicKey::from_bytes(value.0.as_ref()).map(HsIdKey)
     }
 }
-impl From<OnionIdKey> for OnionId {
-    fn from(value: OnionIdKey) -> Self {
+impl From<HsIdKey> for HsId {
+    fn from(value: HsIdKey) -> Self {
         value.id()
     }
 }
 
-impl OnionIdKey {
+/// VERSION from rend-spec-v3 s.6 \[ONIONADDRESS]
+const HSID_ONION_VERSION: u8 = 0x03;
+
+/// The fixed string `.onion`
+pub const HSID_ONION_SUFFIX: &str = ".onion";
+
+impl Display for HsId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // rend-spec-v3 s.6 [ONIONADDRESS]
+        let checksum = self.onion_checksum();
+        let binary = chain!(self.0.as_ref(), &checksum, &[HSID_ONION_VERSION],)
+            .cloned()
+            .collect_vec();
+        let mut b32 = data_encoding::BASE32_NOPAD.encode(&binary);
+        b32.make_ascii_lowercase();
+        write!(f, "{}{}", b32, HSID_ONION_SUFFIX)
+    }
+}
+
+impl safelog::Redactable for HsId {
+    // We here display some of the end.  We don't want to display the
+    // *start* because vanity domains, which would perhaps suffer from
+    // reduced deniability.
+    fn display_redacted(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let unredacted = self.to_string();
+        /// Length of the base32 data part of the address
+        const DATA: usize = 56;
+        assert_eq!(unredacted.len(), DATA + HSID_ONION_SUFFIX.len());
+
+        // We show this part of the domain:
+        //     e     n     l     5     s     i     d     .onion
+        //   KKKKK KKKKK KCCCC CCCCC CCCCC CCVVV VVVVV
+        //                           ^^^^^^^^^^^^^^^^^ ^^^^^^^^^
+        // This contains 3 characters of base32, which is 15 bits.
+        // 8 of those bits are the version, which is currently always 0x03.
+        // So we are showing 7 bits derived from the site key.
+
+        write!(f, "???{}", &unredacted[DATA - 3..])
+    }
+}
+
+impl FromStr for HsId {
+    type Err = HsIdParseError;
+    fn from_str(s: &str) -> Result<Self, HsIdParseError> {
+        use HsIdParseError as PE;
+
+        let s = s
+            .strip_suffix_ignore_ascii_case(HSID_ONION_SUFFIX)
+            .ok_or(PE::NotOnionDomain)?;
+
+        if s.contains('.') {
+            return Err(PE::HsIdContainsSubdomain);
+        }
+
+        // We must convert to uppercase because RFC4648 says so and that's what Rust
+        // ecosystem libraries for base32 expect.  All this allocation and copying is
+        // still probably less work than the SHA3 for the checksum.
+        // However, we are going to use this function to *detect* and filter .onion
+        // addresses, so it should have a fast path to reject thm.
+        let mut s = s.to_owned();
+        s.make_ascii_uppercase();
+
+        // Ideally we'd have code here that would provide a clear error message if
+        // we encounter an address with the wrong version.  But that is very complicated
+        // because the encoding format does not make that at all convenient.
+        // So instead our errors tell you what aspect of the parsing went wrong.
+        let binary = data_encoding::BASE32_NOPAD.decode(s.as_bytes())?;
+        let mut binary = tor_bytes::Reader::from_slice(&binary);
+
+        let pubkey: [u8; 32] = binary.extract()?;
+        let checksum: [u8; 2] = binary.extract()?;
+        let version: u8 = binary.extract()?;
+        let tentative = HsId(pubkey.into());
+
+        // Check version before checksum; maybe a future version does checksum differently
+        if version != HSID_ONION_VERSION {
+            return Err(PE::UnsupportedVersion(version));
+        }
+        if checksum != tentative.onion_checksum() {
+            return Err(PE::WrongChecksum);
+        }
+        Ok(tentative)
+    }
+}
+
+/// Error that can occur parsing an `HsId` from a v3 `.onion` domain name
+// TODO HS this should probably implement ErrorKind
+#[derive(Error, Clone, Debug)]
+#[non_exhaustive]
+pub enum HsIdParseError {
+    /// Supplied domain name string does not end in `.onion`
+    #[error("Domain name does not end in .onion")]
+    NotOnionDomain,
+
+    /// Base32 decoding failed
+    ///
+    /// `position` is indeed the (byte) position in the input string
+    #[error("Invalid base32 in .onion address")]
+    InvalidBase32(#[from] data_encoding::DecodeError),
+
+    /// Encoded binary data is invalid
+    #[error("Invalid encoded binary data in .onion address")]
+    InvalidData(#[from] tor_bytes::Error),
+
+    /// Unsupported `.onion` address version
+    #[error("Unsupported .onion address version, v{0}")]
+    UnsupportedVersion(u8),
+
+    /// Checksum failed
+    #[error("Checksum failed, .onion address corrupted")]
+    WrongChecksum,
+
+    /// If you try to parse a domain with subdomains as an `HsId`
+    #[error("`.onion` address with subdomain passed where not expected")]
+    HsIdContainsSubdomain,
+}
+
+impl HsId {
+    /// Calculates CHECKSUM rend-spec-v3 s.6 \[ONIONADDRESS]
+    fn onion_checksum(&self) -> [u8; 2] {
+        let mut h = Sha3_256::new();
+        h.update(b".onion checksum");
+        h.update(self.0.as_ref());
+        h.update([HSID_ONION_VERSION]);
+        h.finalize()[..2]
+            .try_into()
+            .expect("slice of fixed size wasn't that size")
+    }
+}
+
+impl HsIdKey {
     /// Derive the blinded key and subcredential for this identity during `cur_period`.
     pub fn compute_blinded_key(
         &self,
         cur_period: TimePeriod,
-    ) -> Result<(BlindedOnionIdKey, crate::Subcredential), keymanip::BlindingError> {
+    ) -> Result<(HsBlindIdKey, crate::Subcredential), keymanip::BlindingError> {
         // TODO hs: decide whether we want to support this kind of shared secret; C Tor does not.
         let secret = b"";
-        let param = self.blinding_parameter(secret, cur_period);
+        let h = self.blinding_factor(secret, cur_period);
 
-        let blinded_key = keymanip::blind_pubkey(&self.0, param)?;
+        let blinded_key = keymanip::blind_pubkey(&self.0, h)?;
         // rend-spec-v3 section 2.1
         let subcredential_bytes: [u8; 32] = {
             // N_hs_subcred = H("subcredential" | N_hs_cred | blinded-public-key).
@@ -113,11 +272,13 @@ impl OnionIdKey {
         Ok((blinded_key.into(), subcredential_bytes.into()))
     }
 
-    /// Compute the 32-byte "blinding parameters" used to compute blinded public
+    /// Compute the 32-byte "blinding factor" used to compute blinded public
     /// (and secret) keys.
-    fn blinding_parameter(&self, secret: &[u8], cur_period: TimePeriod) -> [u8; 32] {
+    ///
+    /// Returns the value `h = H(...)`, from rend-spec-v3 A.2., before clamping.
+    fn blinding_factor(&self, secret: &[u8], cur_period: TimePeriod) -> [u8; 32] {
         // rend-spec-v3 appendix A.2
-        // We generate our key blinding parameter as
+        // We generate our key blinding factor as
         //    h = H(BLIND_STRING | A | s | B | N)
         // Where:
         //    H is SHA3-256.
@@ -141,38 +302,32 @@ impl OnionIdKey {
         h.update(ED25519_BASEPOINT);
         h.update(b"key-blind");
         h.update(cur_period.interval_num.to_be_bytes());
-        h.update(u64::from(cur_period.length_in_sec).to_be_bytes());
+        h.update((u64::from(cur_period.length.as_minutes())).to_be_bytes());
 
         h.finalize().into()
     }
 }
 
-impl OnionIdSecretKey {
+impl HsIdSecretKey {
     /// Derive the blinded key and subcredential for this identity during `cur_period`.
     pub fn compute_blinded_key(
         &self,
         cur_period: TimePeriod,
-    ) -> Result<
-        (
-            BlindedOnionIdKey,
-            BlindedOnionIdSecretKey,
-            crate::Subcredential,
-        ),
-        keymanip::BlindingError,
-    > {
+    ) -> Result<(HsBlindIdKey, HsBlindIdSecretKey, crate::Subcredential), keymanip::BlindingError>
+    {
         // TODO hs: as above, decide if we want this.
         let secret = b"";
 
         // Note: This implementation is somewhat inefficient, as it recomputes
-        // the PublicKey, and computes our blinding parameters twice.  But we
+        // the PublicKey, and computes our blinding factor twice.  But we
         // only do this on an onion service once per time period: the
         // performance does not matter.
 
-        let public_key: OnionIdKey = ed25519::PublicKey::from(&self.0).into();
+        let public_key: HsIdKey = ed25519::PublicKey::from(&self.0).into();
         let (blinded_public_key, subcredential) = public_key.compute_blinded_key(cur_period)?;
 
-        let param = public_key.blinding_parameter(secret, cur_period);
-        let blinded_secret_key = keymanip::blind_seckey(&self.0, param)?;
+        let h = public_key.blinding_factor(secret, cur_period);
+        let blinded_secret_key = keymanip::blind_seckey(&self.0, h)?;
 
         Ok((blinded_public_key, blinded_secret_key.into(), subcredential))
     }
@@ -182,89 +337,116 @@ define_pk_keypair! {
 /// The "blinded" identity of a v3 onion service. (`KP_hs_blind_id`)
 ///
 /// This key is derived via a one-way transformation from an
-/// `OnionIdKey` and the current time period.
+/// `HsIdKey` and the current time period.
 ///
 /// It is used for two purposes: first, to compute an index into the HSDir
 /// ring, and second, to sign a `DescSigningKey`.
 ///
-/// Note: This is a separate type from [`BlindedOnionId`] because it is about 6x
+/// Note: This is a separate type from [`HsBlindId`] because it is about 6x
 /// larger.  It is an expanded form, used for doing actual cryptography.
-pub struct BlindedOnionIdKey(ed25519::PublicKey) / BlindedOnionIdSecretKey(ed25519::ExpandedSecretKey);
+pub struct HsBlindIdKey(ed25519::PublicKey) / HsBlindIdSecretKey(ed25519::ExpandedSecretKey);
 }
 
 define_bytes! {
 /// A blinded onion service identity, represented in a compact format. (`KP_hs_blind_id`)
 ///
-/// Note: This is a separate type from [`BlindedOnionIdKey`] because it is about
+/// Note: This is a separate type from [`HsBlindIdKey`] because it is about
 /// 6x smaller.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct BlindedOnionId([u8; 32]);
+pub struct HsBlindId([u8; 32]);
 }
 
-impl BlindedOnionIdKey {
-    /// Return a representation of this key as a [`BlindedOnionId`].
+impl HsBlindIdKey {
+    /// Return a representation of this key as a [`HsBlindId`].
     ///
-    /// ([`BlindedOnionId`] is much smaller, and easier to store.)
-    pub fn id(&self) -> BlindedOnionId {
-        BlindedOnionId(self.0.to_bytes().into())
+    /// ([`HsBlindId`] is much smaller, and easier to store.)
+    pub fn id(&self) -> HsBlindId {
+        HsBlindId(self.0.to_bytes().into())
     }
 }
-impl TryFrom<BlindedOnionId> for BlindedOnionIdKey {
+impl TryFrom<HsBlindId> for HsBlindIdKey {
     type Error = signature::Error;
 
-    fn try_from(value: BlindedOnionId) -> Result<Self, Self::Error> {
-        ed25519::PublicKey::from_bytes(value.0.as_ref()).map(BlindedOnionIdKey)
+    fn try_from(value: HsBlindId) -> Result<Self, Self::Error> {
+        ed25519::PublicKey::from_bytes(value.0.as_ref()).map(HsBlindIdKey)
     }
 }
-impl From<BlindedOnionIdKey> for BlindedOnionId {
-    fn from(value: BlindedOnionIdKey) -> Self {
+impl From<HsBlindIdKey> for HsBlindId {
+    fn from(value: HsBlindIdKey) -> Self {
         value.id()
     }
 }
+impl From<ed25519::Ed25519Identity> for HsBlindId {
+    fn from(value: ed25519::Ed25519Identity) -> Self {
+        Self(CtByteArray::from(<[u8; 32]>::from(value)))
+    }
+}
 
-impl BlindedOnionIdSecretKey {
+impl HsBlindIdSecretKey {
     /// Compute a signature of `message` with this key, using the corresponding `public_key`.
-    pub fn sign(&self, message: &[u8], public_key: &BlindedOnionIdKey) -> ed25519::Signature {
+    pub fn sign(&self, message: &[u8], public_key: &HsBlindIdKey) -> ed25519::Signature {
         self.0.sign(message, &public_key.0)
+    }
+}
+
+/// A blinded Ed25519 keypair.
+#[allow(clippy::exhaustive_structs)]
+#[derive(Debug)]
+pub struct HsBlindKeypair {
+    /// The public part of the key.
+    pub public: HsBlindIdKey,
+    /// The secret part of the key.
+    pub secret: HsBlindIdSecretKey,
+}
+
+impl Signer<ed25519::Signature> for HsBlindKeypair {
+    fn try_sign(&self, msg: &[u8]) -> Result<ed25519::Signature, signature::Error> {
+        Ok(self.secret.sign(msg, &self.public))
+    }
+}
+
+impl Ed25519PublicKey for HsBlindKeypair {
+    fn public_key(&self) -> &ed25519::PublicKey {
+        &self.public
     }
 }
 
 define_pk_keypair! {
 /// A key used to sign onion service descriptors. (`KP_desc_sign`)
 ///
-/// It is authenticated with a `BlindedOnionIdKeys` to prove that it belongs to
+/// It is authenticated with a [`HsBlindIdKey`] to prove that it belongs to
 /// the right onion service, and is used in turn to sign the descriptor that
 /// tells clients what they need to know about contacting an onion service.
 ///
 /// Onion services create a new `DescSigningKey` every time the
-/// `BlindedOnionIdKeys` rotates, to prevent descriptors made in one time period
+/// `HsBlindIdKey` rotates, to prevent descriptors made in one time period
 /// from being linkable to those made in another.
 ///
 /// Note: we use a separate signing key here, rather than using the
-/// BlindedOnionIdKey directly, so that the secret key for the BlindedOnionIdKey
+/// `HsBlindIdKey` directly, so that the [`HsBlindIdSecretKey`]
 /// can be kept offline.
-pub struct DescSigningKey(ed25519::PublicKey) / DescSigningSecretKey(ed25519::SecretKey);
+pub struct HsDescSigningKey(ed25519::PublicKey) / HsDescSigningSecretKey(ed25519::SecretKey);
 }
 
 define_pk_keypair! {
 /// A key used to identify and authenticate an onion service at a single
-/// introduction point. (`KP_hs_intro_tid`)
+/// introduction point. (`KP_hs_ipt_sid`)
 ///
 /// This key is included in the onion service's descriptor; a different one is
 /// used at each introduction point.  Introduction points don't know the
 /// relation of this key to the onion service: they only recognize the same key
 /// when they see it again.
-pub struct IntroPtAuthKey(ed25519::PublicKey) / IntroPtAuthSecretKey(ed25519::SecretKey);
+pub struct HsIntroPtSessionIdKey(ed25519::PublicKey) / HsIntroPtSessionIdSecretKey(ed25519::SecretKey);
 }
 
 define_pk_keypair! {
 /// A key used in the HsNtor handshake between the client and the onion service.
-/// (`KP_hs_into_ntor`)
+/// (`KP_hss_ntor`)
 ///
 /// The onion service chooses a different one of these to use with each
 /// introduction point, though it does not need to tell the introduction points
 /// about these keys.
-pub struct IntroPtEncKey(curve25519::PublicKey) / IntroPtEncSecretKey(curve25519::StaticSecret);
+pub struct HsSvcNtorKey(curve25519::PublicKey) / HsSvcNtorSecretKey(curve25519::StaticSecret);
 }
 
 define_pk_keypair! {
@@ -273,7 +455,7 @@ define_pk_keypair! {
 ///
 /// This is used to sign a nonce included in an extension in the encrypted
 /// portion of an introduce cell.
-pub struct ClientIntroAuthKey(ed25519::PublicKey) / ClientIntroAuthSecretKey(ed25519::SecretKey);
+pub struct HsClientIntroAuthKey(ed25519::PublicKey) / HsClientIntroAuthSecretKey(ed25519::SecretKey);
 }
 
 define_pk_keypair! {
@@ -282,18 +464,15 @@ define_pk_keypair! {
 ///
 /// Any client who knows the secret key corresponding to this key can decrypt
 /// the inner layer of the onion service descriptor.
-pub struct ClientDescAuthKey(curve25519::PublicKey) / ClientDescAuthSecretKey(curve25519::StaticSecret);
+pub struct HsClientDescEncKey(curve25519::PublicKey) / HsClientDescEncSecretKey(curve25519::StaticSecret);
 }
 
-/// A set of keys to tell the client to use when connecting to an onion service.
-//
-// TODO hs
-pub struct ClientSecretKeys {
-    /// Possibly, a key that is used to decrypt a descriptor.
-    desc_auth: Option<ClientDescAuthSecretKey>,
-    /// Possibly, a key that is used to authenticate while
-    /// introducing.
-    intro_auth: Option<ClientIntroAuthSecretKey>,
+define_pk_keypair! {
+/// Server key, used for diffie hellman during onion descriptor decryption.
+/// (`KP_hss_desc_enc`)
+///
+/// This key is created for a single descriptor, and then thrown away.
+pub struct HsSvcDescEncKey(curve25519::PublicKey) / HsSvcDescEncSecretKey(curve25519::StaticSecret);
 }
 
 #[cfg(test)]
@@ -310,6 +489,8 @@ mod test {
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
 
     use hex_literal::hex;
+    use itertools::izip;
+    use safelog::Redactable;
     use signature::Verifier;
     use std::time::{Duration, SystemTime};
     use tor_basic_utils::test_rng::testing_rng;
@@ -318,13 +499,57 @@ mod test {
     use super::*;
 
     #[test]
+    fn hsid_strings() {
+        use HsIdParseError as PE;
+
+        // From C Tor src/test/test_hs_common.c test_build_address
+        let hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let b32 = "25njqamcweflpvkl73j4szahhihoc4xt3ktcgjnpaingr5yhkenl5sid";
+
+        let hsid: [u8; 32] = hex::decode(hex).unwrap().try_into().unwrap();
+        let hsid = HsId::from(hsid);
+        let onion = format!("{}.onion", b32);
+
+        assert_eq!(onion.parse::<HsId>().unwrap(), hsid);
+        assert_eq!(hsid.to_string(), onion);
+
+        let weird_case: String = izip!(onion.chars(), [false, true].iter().cloned().cycle(),)
+            .map(|(c, swap)| if swap { c.to_ascii_uppercase() } else { c })
+            .collect();
+        dbg!(&weird_case);
+        assert_eq!(weird_case.parse::<HsId>().unwrap(), hsid);
+
+        macro_rules! chk_err { { $s:expr, $($pat:tt)* } => {
+            let e = $s.parse::<HsId>();
+            assert!(matches!(e, Err($($pat)*)), "{:?}", &e);
+        } }
+        let edited = |i, c| {
+            let mut s = b32.to_owned().into_bytes();
+            s[i] = c;
+            format!("{}.onion", String::from_utf8(s).unwrap())
+        };
+
+        chk_err!("wrong", PE::NotOnionDomain);
+        chk_err!("@.onion", PE::InvalidBase32(..));
+        chk_err!("aaaaaaaa.onion", PE::InvalidData(..));
+        chk_err!(edited(55, b'E'), PE::UnsupportedVersion(4));
+        chk_err!(edited(53, b'X'), PE::WrongChecksum);
+        chk_err!(&format!("www.{}", &onion), PE::HsIdContainsSubdomain);
+
+        assert_eq!(format!("{:x}", &hsid), format!("HsId(0x{})", hex));
+        assert_eq!(format!("{:?}", &hsid), format!("HsId({})", onion));
+
+        assert_eq!(format!("{}", hsid.redacted()), "???sid.onion");
+    }
+
+    #[test]
     fn key_blinding_blackbox() {
         let mut rng = testing_rng().rng_compat();
         let offset = Duration::new(12 * 60 * 60, 0);
         let when = TimePeriod::new(Duration::from_secs(3600), SystemTime::now(), offset).unwrap();
         let keypair = ed25519::Keypair::generate(&mut rng);
-        let id_pub = OnionIdKey::from(keypair.public);
-        let id_sec = OnionIdSecretKey::from(ed25519::ExpandedSecretKey::from(&keypair.secret));
+        let id_pub = HsIdKey::from(keypair.public);
+        let id_sec = HsIdSecretKey::from(ed25519::ExpandedSecretKey::from(&keypair.secret));
 
         let (blinded_pub, subcred1) = id_pub.compute_blinded_key(when).unwrap();
         let (blinded_pub2, blinded_sec, subcred2) = id_sec.compute_blinded_key(when).unwrap();
@@ -344,29 +569,28 @@ mod test {
     #[test]
     fn key_blinding_testvec() {
         // Test vectors generated with C tor.
-        let id = OnionId::from(hex!(
+        let id = HsId::from(hex!(
             "833990B085C1A688C1D4C8B1F6B56AFAF5A2ECA674449E1D704F83765CCB7BC6"
         ));
-        let id_pubkey = OnionIdKey::try_from(id).unwrap();
-        let id_seckey = OnionIdSecretKey::from(
+        let id_pubkey = HsIdKey::try_from(id).unwrap();
+        let id_seckey = HsIdSecretKey::from(
             ed25519::ExpandedSecretKey::from_bytes(&hex!(
                 "D8C7FF0E31295B66540D789AF3E3DF992038A9592EEA01D8B7CBA06D6E66D159
                  4D6167696320576F7264733A20737065697373636F62616C742062697669756D"
             ))
             .unwrap(),
         );
-        let offset = Duration::new(12 * 60 * 60, 0);
         let time_period = TimePeriod::new(
-            Duration::from_secs(1440),
-            humantime::parse_rfc3339("1970-01-22T01:50:33Z").unwrap(),
-            offset,
+            humantime::parse_duration("1 day").unwrap(),
+            humantime::parse_rfc3339("1973-05-20T01:50:33Z").unwrap(),
+            humantime::parse_duration("12 hours").unwrap(),
         )
         .unwrap();
         assert_eq!(time_period.interval_num, 1234);
 
-        let param = id_pubkey.blinding_parameter(b"", time_period);
+        let h = id_pubkey.blinding_factor(b"", time_period);
         assert_eq!(
-            param,
+            h,
             hex!("379E50DB31FEE6775ABD0AF6FB7C371E060308F4F847DB09FE4CFE13AF602287")
         );
 

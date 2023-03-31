@@ -1,80 +1,129 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg))]
 #![doc = include_str!("../README.md")]
-// TODO hs: Add complete suite of warnings here.
-#![allow(dead_code, unused_variables)] // TODO hs remove.
+// @@ begin lint list maintained by maint/add_warning @@
+#![cfg_attr(not(ci_arti_stable), allow(renamed_and_removed_lints))]
+#![cfg_attr(not(ci_arti_nightly), allow(unknown_lints))]
+#![deny(missing_docs)]
+#![warn(noop_method_call)]
+#![deny(unreachable_pub)]
+#![warn(clippy::all)]
+#![deny(clippy::await_holding_lock)]
+#![deny(clippy::cargo_common_metadata)]
+#![deny(clippy::cast_lossless)]
+#![deny(clippy::checked_conversions)]
+#![warn(clippy::cognitive_complexity)]
+#![deny(clippy::debug_assert_with_mut_call)]
+#![deny(clippy::exhaustive_enums)]
+#![deny(clippy::exhaustive_structs)]
+#![deny(clippy::expl_impl_clone_on_copy)]
+#![deny(clippy::fallible_impl_from)]
+#![deny(clippy::implicit_clone)]
+#![deny(clippy::large_stack_arrays)]
+#![warn(clippy::manual_ok_or)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![deny(clippy::missing_panics_doc)]
+#![warn(clippy::needless_borrow)]
+#![warn(clippy::needless_pass_by_value)]
+#![warn(clippy::option_option)]
+#![warn(clippy::rc_buffer)]
+#![deny(clippy::ref_option_ref)]
+#![warn(clippy::semicolon_if_nothing_returned)]
+#![warn(clippy::trait_duplication_in_bounds)]
+#![deny(clippy::unnecessary_wraps)]
+#![warn(clippy::unseparated_literal_suffix)]
+#![deny(clippy::unwrap_used)]
+#![allow(clippy::let_unit_value)] // This can reasonably be done for explicitness
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::significant_drop_in_scrutinee)] // arti/-/merge_requests/588/#note_2812945
+#![allow(clippy::result_large_err)] // temporary workaround for arti#587
+//! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 
+mod connect;
+mod err;
+mod isol_map;
 mod keys;
 mod state;
 
-use async_trait::async_trait;
-use std::sync::Arc;
-use tor_hscrypto::pk::{ClientSecretKeys, OnionId};
-use tor_proto::circuit::ClientCirc;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 
-use tor_circmgr::{CircMgr, OnionConnectError, OnionServiceConnector};
-use tor_netdir::NetDirProvider;
+use educe::Educe;
+
+use tor_circmgr::hspool::HsCircPool;
+use tor_circmgr::isolation::StreamIsolation;
+use tor_hscrypto::pk::HsId;
+use tor_netdir::NetDir;
+use tor_proto::circuit::ClientCirc;
 use tor_rtcompat::Runtime;
 
+pub use err::{ConnError, StartupError};
+pub use keys::{HsClientSecretKeys, HsClientSecretKeysBuilder};
+
+use state::Services;
+
 /// An object that negotiates connections with onion services
-pub struct HsClientConnector<R: Runtime> {
-    /// A [`CircMgr`] that we use to build circuits to HsDirs, introduction
+///
+/// This can be used by multiple requests on behalf of different clients,
+/// with potentially different HS client authentication (`KS_hsc_*`)
+/// and potentially different circuit isolation.
+///
+/// The principal entrypoint is
+/// [`get_or_launch_connection()`](HsClientConnector::get_or_launch_connection).
+///
+/// This object is handle-like: it is fairly cheap to clone,
+///  and contains `Arc`s internally.
+#[derive(Educe)]
+#[educe(Clone)]
+pub struct HsClientConnector<R: Runtime, D: state::MockableConnectorData = connect::Data> {
+    /// The runtime
+    runtime: R,
+    /// A [`HsCircPool`] that we use to build circuits to HsDirs, introduction
     /// points, and rendezvous points.
-    //
-    // TODO hs: currently this is a circular set of Arc, since the CircMgr will
-    // have to hold an Arc<OnionServiceConnector>.  We should make one Weak.
-    //
-    // TODO hs: Maybe we can make a trait that only gives a minimal "build a
-    // circuit" API from CircMgr, so that we can have this be a dyn reference
-    // too?
-    circmgr: Arc<CircMgr<R>>,
-    /// A [`NetDirProvider`] that we use to pick rendezvous points.
-    //
-    // TODO hs: Should this be weak too?
-    netdir_provider: Arc<dyn NetDirProvider>,
+    circpool: Arc<HsCircPool<R>>,
     /// Information we are remembering about different onion services.
-    //
-    // TODO hs: if we implement cache isolation or state isolation, we might
-    // need multiple instances of this.
-    state: state::StateMap,
-    /// A collection of private keys to be used with various onion services.
-    //
-    // TODO hs: we might even want multiple instances of this, depending on how
-    // we decide to do isolation.
-    keys: keys::Keys,
+    services: Arc<Mutex<state::Services<D>>>,
+    /// For mocking in tests of `state.rs`
+    mock_for_state: D::MockGlobalState,
 }
 
-impl<R: Runtime> HsClientConnector<R> {
-    // TODO hs: Need a way to manage the set of keys.
+impl<R: Runtime> HsClientConnector<R, connect::Data> {
+    /// Create a new `HsClientConnector`
+    pub fn new(
+        runtime: R,
+        circpool: Arc<HsCircPool<R>>,
+        // TODO HS: there should be a config here, we will probably need it at some point
+        // TODO HS: will needs a periodic task handle for us to expire old HS data/circuits
+    ) -> Result<Self, StartupError> {
+        Ok(HsClientConnector {
+            runtime,
+            circpool,
+            services: Arc::new(Mutex::new(Services::default())),
+            mock_for_state: (),
+        })
+    }
 
-    // TODO hs: need a constructor here.
-
-    // TODO hs: need a function to clear our StateMap, or to create a new
-    // isolated StateMap.
+    /// Connect to a hidden service
+    ///
+    /// Each HS connection request must provide the appropriate
+    /// client authentication keys to use -
+    /// or [`default`](HsClientSecretKeys::default) if client auth is not required.
     //
-    // TODO hs: Also, we need to expose that function from `TorClient`, possibly
-    // in the existing isolation API, possibly in something new.
-}
-
-#[async_trait]
-impl<R: Runtime> OnionServiceConnector for HsClientConnector<R> {
-    async fn create_connection(
-        &self,
-        service_id: OnionId,
-        using_keys: Option<ClientSecretKeys>,
-    ) -> Result<ClientCirc, OnionConnectError> {
-        todo!() // TODO hs
-
-        // This function must do the following, retrying as appropriate.
-        //  - Look up the onion descriptor in the state.
-        //  - Download the onion descriptor if one isn't there.
-        //  - In parallel:
-        //    - Pick a rendezvous point from the netdirprovider and launch a
-        //      rendezvous circuit to it. Then send ESTABLISH_INTRO.
-        //    - Pick a number of introduction points (1 or more) and try to
-        //      launch circuits to them.
-        //  - On a circuit to an introduction point, send an INTRODUCE1 cell.
-        //  - Wait for a RENDEZVOUS2 cell on the rendezvous circuit
-        //  - Add a virtual hop to the rendezvous circuit.
-        //  - Return the rendezvous circuit.
+    // This returns an explicit `impl Future` so that we can write the `Send` bound.
+    // Without this, it is possible for `Services::get_or_launch_connection`
+    // to not return a `Send` future.
+    // https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/1034#note_2881718
+    pub fn get_or_launch_connection<'r>(
+        &'r self,
+        netdir: &'r Arc<NetDir>,
+        hs_id: HsId,
+        secret_keys: HsClientSecretKeys,
+        isolation: StreamIsolation,
+    ) -> impl Future<Output = Result<ClientCirc, ConnError>> + Send + Sync + 'r {
+        // As in tor-circmgr,  we take `StreamIsolation`, to ensure that callers in
+        // arti-client pass us the final overall isolation,
+        // including the per-TorClient isolation.
+        // But internally we need a Box<dyn Isolation> since we need .join().
+        let isolation = Box::new(isolation);
+        Services::get_or_launch_connection(self, netdir, hs_id, isolation, secret_keys)
     }
 }

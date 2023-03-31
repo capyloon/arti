@@ -79,6 +79,23 @@ impl<T> TimerangeBound<T> {
         let start = self.start.map(|t| t - d);
         Self { start, ..self }
     }
+    /// Consume this [`TimerangeBound`], and return a new one with the same
+    /// bounds, applying `f` to its protected value.
+    ///
+    /// The caller must ensure that `f` does not make any assumptions about the
+    /// timeliness of the protected value, or leak any of its contents in
+    /// an inappropriate way.
+    #[must_use]
+    pub fn dangerously_map<F, U>(self, f: F) -> TimerangeBound<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        TimerangeBound {
+            obj: f(self.obj),
+            start: self.start,
+            end: self.end,
+        }
+    }
 
     /// Consume this TimeRangeBound, and return its underlying time bounds and
     /// object.
@@ -199,11 +216,14 @@ mod test {
 
     #[test]
     fn test_checking() {
-        let one_day = Duration::new(86400, 0);
-        let de = SystemTime::UNIX_EPOCH + one_day * 7580;
-        let cz_sk = SystemTime::UNIX_EPOCH + one_day * 8401;
-        let eu = SystemTime::UNIX_EPOCH + one_day * 8705;
-        let za = SystemTime::UNIX_EPOCH + one_day * 8882;
+        // West and East Germany reunified
+        let de = humantime::parse_rfc3339("1990-10-03T00:00:00Z").unwrap();
+        // Czechoslovakia separates into Czech Republic (Bohemia) & Slovakia
+        let cz_sk = humantime::parse_rfc3339("1993-01-01T00:00:00Z").unwrap();
+        // European Union created
+        let eu = humantime::parse_rfc3339("1993-11-01T00:00:00Z").unwrap();
+        // South Africa holds first free and fair elections
+        let za = humantime::parse_rfc3339("1994-04-27T00:00:00Z").unwrap();
 
         // check_valid_at
         let tr = TimerangeBound::new("Hello world", cz_sk..eu);
@@ -231,7 +251,6 @@ mod test {
         assert!(tr.check_valid_at_opt(None).is_err());
     }
 
-    #[cfg(feature = "experimental-api")]
     #[test]
     fn test_dangerous() {
         let t1 = SystemTime::now();
@@ -244,5 +263,19 @@ mod test {
         assert_eq!(a, "cups of coffee");
         assert_eq!(b.0, Bound::Included(t1));
         assert_eq!(b.1, Bound::Included(t2));
+    }
+
+    #[test]
+    fn test_map() {
+        let t1 = SystemTime::now();
+        let min = Duration::from_secs(60);
+
+        let tb = TimerangeBound::new(17_u32, t1..t1 + 5 * min);
+        let tb = tb.dangerously_map(|v| v * v);
+        assert!(tb.is_valid_at(&(t1 + 1 * min)).is_ok());
+        assert!(tb.is_valid_at(&(t1 + 10 * min)).is_err());
+
+        let val = tb.check_valid_at(&(t1 + 1 * min)).unwrap();
+        assert_eq!(val, 289);
     }
 }
