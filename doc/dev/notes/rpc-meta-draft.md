@@ -107,53 +107,66 @@ an "error" indicates a failure.
 > For example, a request to observe all circuit-build events
 > will receive only a series of updates.
 
+Messages are representable as JSON -
+specifically, the are within the subset defined in RFC7493 (I-JSON).
+In the current concrete protocol they are *represented as* JSON;
+we may define other encodings/framings in the future.
+
 ## Requests, Objects, and Visibility
 
-Every request is directed to some object.
+Every request is directed to some Object.
 (For example, an object may be a session,
 a circuit, a stream, an onion service,
 or the arti process itself.)
+In this document, Object means the target of a request;
+not a JSON document object.
 
-Only certain objects are visible within a given session.
+Only certain Objects are visible within a given session.
 When a session is first created,
-the session itself is the only object visible.
-Other objects may become visible
+the session itself is the only Object visible.
+Other Objects may become visible
 in response to the application's requests.
-If an object is not visible in a session,
+If an Object is not visible in a session,
 that session cannot access it.
 
-Clients identify each object within a session
-by an opaque "object identifier".
+Clients identify each Object within a session
+by an opaque string, called an "Object Identifier".
 Each identifier may be a "handle" or a "reference".
-If a session has a _handle_ to an object,
-Arti won't deliberately discard that object
+If a session has a _handle_ to an Object,
+Arti won't deliberately discard that Object
 until it the handle is "released",
 or the session is closed.
-If a session only has a _reference_ to an object, however,
-that object might be closed or discarded in the background,
+If a session only has a _reference_ to an Object, however,
+that Object might be closed or discarded in the background,
 and there is no need to release it.
 
-> For more on how this is implemented,
-> see "Representing object identifiers" below.
+The format of an Object Identifier string is not stable,
+and clients must not rely on it.
+
 
 ## Request and response types
 
 There are different kinds of requests,
-each identified by a unique method name,
-and each with an associated set of named parameters.
-Some requests can be sent to many kinds of object;
-some are only suitable for one kind of object.
+each identified by a unique method name.
 
-When we define a request,
-we must also define the types of responses
-that will be sent in reply to it.
-Every response has a given set of named parameters.
+Each method is associated with a set of named parameters.
+Some requests can be sent to many kinds of Object;
+some are only suitable for one kind of Object.
+
+When we define a method,
+we state its name,
+and the names and types of the parameters `params`.
+and the expected contents of the successful `result`,
+and any `updates`s.
 
 Unrecognized parameters must be ignored.
+Indeed, any unrecognized fields in a JSON object must be ignored,
+both by the server and by the client.
 
 Invalid JSON
 and parameter values that do not match their specified types
-will be treated as an error.
+must be treated as an error,
+both by the server and by the client.
 
 ## Data Streams
 
@@ -192,24 +205,31 @@ for our requests:
 
 id
 : An identifier for the request.
-  This may be an integer or a string. It is required.
-  Arti will accept integers between `INT64_MIN` and `INT64_MAX`.
+  This may be a number or a string. It is required.
+  (Floating point numbers and
+  integers that can't be precisely represented as an IEEE-754 double
+  are not guaranteed to round trip accurately.
+  Integers whose absolute value is no greater than
+  `2^53-1 = 9007199254740991`,
+  will round trip accurately.
+  64-bit integers might not.)
 
 obj
-: An object identifier for the object that will receive this request.
+: An Object Identifier for the Object that will receive this request.
   This is a string.  It is required.
 
 method
 : A string naming the method to invoke. It is required.
-  Method names are namespaced;
-  For now, we commit to not using any method name
-  beginning with "x-" or "X-".
-  (If you want to reserve any other prefix,
-  we can eventually start a registry or something.)
+  Method names are namespaced; see
+  "Method Namespacing" below.
 
 params
-: A JSON object describing the parameters for the method. It is optional.
+: A JSON object describing the parameters for the method.
   Its format depends on the method.
+  (Unlike in JSON-RPC, this field is mandatory;
+  or to put it another way, every method we define will
+  require `params` to be provided,
+  even if it is allowed to be empty.)
 
 meta
 : A JSON object describing protocol features to enable for this request.
@@ -236,23 +256,33 @@ Responses follow the following metaformat:
 
 id
 : An identifier for the request.
-  It is required.
+  It is (almost always) required.
   As in JSON-RPC, it will match the id of a request
   previously sent in this session.
   It will match the id of a request
   that has not received a final response.
 
+  (As an exception:
+  A error caused by a request in which the id could not be parsed
+  will have no id itself.
+  We can't use the id of the request with the syntax problem,
+  since it couldn't be parsed.
+  Such errors are always fatal;
+  after sending one, the server will close the connection.)
+
 update
-: A JSON object whose type depends on the request.
+: A JSON object whose contents depends on the request method.
   It is required on an update.
 
 result
-: A JSON object whose type depends on the request.
+: A JSON object whose contents depends on the request method.
   It is required on a successful final response.
 
 error
 : A JSON error object, format TBD.
   It is required on a failed final response.
+  Unlike a `result` and `update`,
+  an error can be parsed and validated without knowing the request method.
 
 Any given response will have exactly one of
 "update", "result", and "error".
@@ -274,6 +304,162 @@ Any given response will have exactly one of
 
 > TODO: Specify our error format to be the same as,
 > or similar to, that used by JSON-RPC.
+
+
+#### Method namespacing
+
+Any method name containing a colon belongs to a namespace.
+The namespace of a method is everything up to the first colon.
+(For example, the method name `arti:connect`
+is in the namespace `arti`.
+The method name `gettype` is not in any namespace.)
+
+Only this spec MAY declare non-namespaced methods.
+All methods defined elsewhere SHOULD be in a namespace.
+
+Right now, the following namespaces are reserved:
+
+* `arti` — For use by the Arti tor implementation project.
+* `auth` — Defined in this spec; for authenticating an initial session.
+
+To reserve a namespace, open a merge request to change the list above.
+
+Namespaces starting with `x-` will never be allocated.
+They are reserved for experimental use.
+
+Method names starting with `x-` indicate
+experimental or unstable status:
+any code using them should expect to be unstable.
+
+
+### Errors
+
+Errors are reported as responses with an `error` field (as above).
+The `error` field is itself an object, with the following fields:
+
+message
+: A String providing a short human-readable description of the error.
+  Clients SHOULD NOT rely on any aspect of the format of this String, 
+  or do anything with it besides display it to the end user.
+  (This is generated by `tor_error::Report` or equivalant.)
+
+kinds
+: An array of Strings, each
+  denoting a category of error.
+  Kinds defined by Arti will begin with the prefix
+  "arti:", and will
+  denote one of the members of [`tor_error::ErrorKind`].
+
+  If Arti renames an `ErrorKind`,
+  the old name will be provided after the new name.
+  If an error is reclassified,
+  Arti will provide the previous classification
+  (the previously reported kind)
+  after the current classification,
+  if it's meaningful,
+  and it's reasonably convenient to do so.
+
+  Therefore, a client which is trying to classify an error
+  should look through the array from start to finish,
+  stopping as soon as it finds a a recognised `ErrorKind`.
+
+  Note that this set may be extended in future,
+  so a client must be prepared to receive unknown values from Arti,
+  and fall back to some kind of default processing.
+
+data
+: A JSON value containing additional error information.
+  An application may use this to handle certain known errors,
+  but must always be prepared to receive unknown errors.
+
+  The value of `data` will be one of the following:
+    * a string, being the error data type name
+    * an object with a single field; the field name is the error data type name;
+      the meaning of the value of that field depends on the error data type name.
+
+  Each method type name defines the format of the associated value.
+  (Note: this is the "externally tagged" serde serialisation format for a Rust enum.)
+
+  The error data type names are in a global namespace,
+  like method names.
+  The `data` can be parsed without knowing the method that generated the error,
+  although obviously the meaning will depend on what operation was being attempted.
+
+  Improved error handling in Arti may make Arti generate
+  different error `data` for particular situations in the future,
+  so clients should avoid relying on the precise contents,
+  other than for non-critical functions such as reporting.
+
+code
+: A Number that indicates the error type that occurred according
+  to the following table.
+  The values are in accordance with the JSON-RPC specification.
+
+  The `code` field is provided for JSON-RPC compatibility,
+  and its use is not recommended.
+  Use `kinds` to distinguish error categories instead.
+  For example, instead of comparing `code` to `-32601`,
+  recognise `RpcMethodNotFound` in `kinds`.
+
+```
+code 	message 	meaning
+-32600 	Invalid Request 	The JSON sent is not a valid Request object.
+-32601 	Method not found 	The method does not exist / is not available on this object.
+-32602 	Invalid params 		Invalid method parameter(s).
+-32603 	Internal error		The server suffered some kind of internal problem
+1	Object error		Some requested object was not valid
+2	Request error		Some other error occurred.
+```
+
+We do not anticipate regularly extending this list of values.
+
+[`tor_error::ErrorKind`]: https://docs.rs/tor-error/latest/tor_error/enum.ErrorKind.html
+
+#### Example error response JSON document
+
+Note: this is an expanded display for clarity!
+Arti will actually send an error response on a single line,
+to conform to jsonlines framing.
+
+```
+{
+   "id" : "5631557cdce0caa0",
+   "error" : {
+      "message" : "Cannot connect to a local-only address without enabling allow_local_addrs",
+      "kinds" : [
+         "ForbiddenStreamTarget"
+      ],
+      "data" : {
+         "arti::ErrorDetail::Address" : "BadOnion",
+      },
+      "code" : -32001
+   }
+}
+```
+
+#### JSON-RPC compatibility
+
+This error format is compatible with JSON-RPC 2.0.
+The differences are:
+
+ * Input that cannot be parsed as JSON is not reported as an error;
+   it is dealt with at the framing layer
+   (probably, by summarily closing the transport connection)
+
+ * The `kinds` field has been added,
+   and use of `code` is discouraged.
+
+ * The `message` field may be less concise than JSON-RPC envisages.
+
+### We use I-JSON
+
+In this spec JSON means I-JSON (RFC7493).
+The client must not send JSON documents that are not valid I-JSON.
+(but Arti may not necessarily reject such documents).
+Arti will only send valid I-JSON
+(assuming the client does so too).
+
+We speak of `fields`, meaning the members of a JSON object.
 
 ### A variant: JSON-RPC.
 
@@ -299,59 +485,33 @@ for ease of debugging and clarity,
 but JSON documents are self-delimiting and
 Arti will parse them disregarding any newlines.)
 
-## Representing object identifiers.
+Clients may send as many requests at the same time as they like.
+arti may send the responses in any order.
+I.e., *arti may send responses out of order*.
 
-> This section describes implementation techniques.
-> Applications should not need to care about it.
-
-Here are two ways to provide our object visibility semantics.
-Applications should not care which one Arti uses.
-Arti may use both methods for different objects
-in the same session.
-
-In one method,
-we use a generational index for each live session
-to hold reference-counted pointers
-to the objects visible in the session.
-The generational index is the identifier for the object.
-(This method is suitable for representing _handles_
-as described above.)
-
-In another method,
-when it is more convenient for Arti to access an object
-by a global identifier `GID`,
-we use a string `GID:MAC(N_s,GID)` for the object's identifier,
-where `N_s` is a per-session secret nonce
-that Arti generates and does not share with the application.
-Arti verifies that the MAC is correct
-before looking up the object by its GID.
-(This method is suitable for representing _references_ as
-described above.)
-
-Finally, in either method, we use a single fixed identifier
-(e.g. `session`)
-for the current session.
+If a client sends too many requests at once,
+arti may stop reading the transport connection,
+until arti has dealt with and replied to some of them.
+There is no minimum must-be-supported number or size of concurrent requests.
+Therefore a client which sends more than one request at a time
+must be prepared to buffer requests at its end,
+while concurrently reading arti's replies.
 
 ## Authentication
 
 When a connection is first opened,
-only authentication requests may be use
-until authentication is successful.
+only a single "connection" object is available.
+Its object ID is "`connection`".
+The client must authenticate to the connection
+in order to receive any other object IDs.
 
-> TODO: Perhaps it would be a good idea to say
-> that when a connection is opened,
-> there is an authentication object (not a session object)
-> and only _that object_ can be used
-> until one of its responses eventually gives the application
-> a session object?
+The pre-authentication methods available on a connection are:
 
-The authentication methods are:
-
-auth:get_proto
+auth:get_rpc_protocol
 : Ask Arti which version of the protocol is in use.
 
 auth:query
-: Ask Arti which authentication methods are acceptable.
+: Ask Arti which authentication schemes are acceptable.
 
 auth:authenticate
 : Try to authenticate using one of the provided authentication
@@ -359,7 +519,7 @@ auth:authenticate
 
 > TODO: Provide more information about these in greater detail.
 
-Three recognized authentication methods are:
+Three recognized authentication schemes are:
 
 inherent:peer_uid
 : Attempt to authenticate based on the the application's
@@ -398,7 +558,7 @@ When we are specifying a request, we list the following.
 
 * The method string for the request.
 
-* Which types of object can receive that request.
+* Which types of Object can receive that request.
 
 * The allowable format for that request's associated parameters.
   This is always given as a Rust struct
@@ -408,6 +568,29 @@ When we are specifying a request, we list the following.
   for the request.
   This is always given as a Rust struct or enum,
   annotated for use with serde.
+
+
+# Differences from JSON-RPC
+
+ * We use I-JSON (RFC7493).
+
+ * Every request must have an `obj` field.
+
+ * A request's `id` may not be `null`.
+
+ * There can be `update`s - non-final responses.
+
+ * We specify a framing protocol
+   (although we permit new framing protocols in the future).
+
+ * We have connection-oriented session state.
+
+ * We support overlapping and pipelined responses,
+   rather than batched multi-requests.
+
+ * TODO our errors are likely to be a superset of JSON-RPC's.  TBD.
+
+ * TODO re-check this spec against JSON-RPC.
 
 
 # A list of requests
@@ -425,13 +608,13 @@ When we are specifying a request, we list the following.
 > "cancel every request with the same id as this request".)
 
 To try to cancel a request,
-there is a "cancel" command, taking arguments of the form:
+there is a "cancel" method, taking arguments of the form:
 
 ```
 { "request_id": id }
 ```
 
-A successful response is the empty object.
+A successful response is the empty JSON object.
 If a successful response is sent,
 then the request was canceled,
 and an error was sent for the canceled request.
@@ -443,6 +626,16 @@ Arti will return an error.
 (It might not be possible to distinguish these two cases).
 
 
+TODO: Currently this violates our rule that every request has an `obj`.
+Options: 
+ 1. Relax the rule
+ 2. Specify a well-known `obj` value to be used;
+    we will need such a thing to bootstrap auth anyway.
+ 3. Specify that the cancellation should be sent to the original object.
+    IMO this is improper:
+    cancellation is a framing operation.
+
+
 ## Authentication
 
 ...
@@ -450,8 +643,7 @@ Arti will return an error.
 > Also authorization, "get instance"
 
 
-
-## Requests that apply to most objects
+## Requests that apply to most Objects
 
 ...
 
@@ -465,7 +657,7 @@ Arti will return an error.
 
 ...
 
-> session.bootstrap object, supports get status
+> session.bootstrap Object, supports get status
 
 ## Instance operations
 
@@ -566,3 +758,35 @@ fn poll_id(Session) -> Option<Fd>;
 
 
 
+# Appendix
+
+Experimenting with Arti
+
+We have a limited implementation of this protocol in Arti right now,
+on an experimental basis.
+It only works on Unix, with `tokio`.
+To try it, enable the `rpc` Cargo feature on the `arti` crate,
+and then connect to `~/.arti-rpc-TESTING/PIPE`.  (You can use
+`nc -U` to do this.)
+
+Right now only two commands are supported:
+Authenticating and an echo command.
+The echo command will only work post-authentication.
+
+Here is an example session:
+
+```
+>>> {"id": "abc", "obj": "connection", "method": "auth:get_rpc_protocol", "params": {}}
+<<< {"id":"abc","result":{"version":"alpha"}}
+>>> {"id": "abc", "obj": "connection", "method": "auth:query", "params": {}}
+<<< {"id":"abc","result":{"schemes":["inherent:unix_path"]}}
+>>> {"id": 3, "obj": "connection", "method": "auth:authenticate", "params": {"scheme": "inherent:unix_path"}}
+<<< {"id":3,"result":{"session":"2yFi5qrMD9LbIWLmqswP0iTenRlVM_Au"}}
+>>> {"id": 4, "obj": "2yFi5qrMD9LbIWLmqswP0iTenRlVM_Au", "method": "arti:x-echo", "params": {"msg": "Hello World"}}
+<<< {"id":4,"result":{"msg":"Hello World"}}
+```
+
+Note that the server will currently close your connection
+at the first sign of invalid JSON.
+
+Please don't expect the final implementation to work this way!

@@ -5,8 +5,9 @@ use std::fmt::Debug;
 use std::mem;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use futures::task::{SpawnError, SpawnExt as _};
 use futures::FutureExt as _;
 
 use async_trait::async_trait;
@@ -15,6 +16,8 @@ use either::Either::{self, *};
 use postage::stream::Stream as _;
 use tracing::{debug, error, trace};
 
+use safelog::sensitive as sv;
+use tor_basic_utils::define_accessor_trait;
 use tor_circmgr::isolation::Isolation;
 use tor_error::{internal, Bug, ErrorReport as _};
 use tor_hscrypto::pk::HsId;
@@ -26,6 +29,33 @@ use crate::{ConnError, HsClientConnector, HsClientSecretKeys};
 
 slotmap::new_key_type! {
     struct TableIndex;
+}
+
+/// Configuration, currently just some retry parameters
+#[derive(Default, Debug)]
+// This is not really public.
+// It has to be `pub` because it appears in one of the methods in `MockableConnectorData`.
+// That has to be because that trait is a bound on a parameter for `HsClientConnector`.
+// `Config` is not re-exported.  (This is isomorphic to the trait sealing pattern.)
+//
+// This means that this struct cannot live in the crate root, so we put it here.
+pub struct Config {
+    /// Retry parameters
+    pub(crate) retry: tor_circmgr::CircuitTiming,
+}
+
+define_accessor_trait! {
+    /// Configuration for an HS client connector
+    ///
+    /// If the HS client connector gains new configurabilities, this trait will gain additional
+    /// supertraits, as an API break.
+    ///
+    /// Prefer to use `TorClientConfig`, which will always implement this trait.
+    //
+    // This arrangement is very like that for `CircMgrConfig`.
+    pub trait HsClientConnectorConfig {
+        circuit_timing: tor_circmgr::CircuitTiming,
+    }
 }
 
 /// Number of times we're willing to iterate round the state machine loop
@@ -45,6 +75,52 @@ slotmap::new_key_type! {
 /// of fallible retriable operations.
 /// Such retries are handled in [`connect.rs`](crate::connect).
 const MAX_RECHECKS: u32 = 10;
+
+/// C Tor `MaxCircuitDirtiness`
+///
+/// As per
+///    <https://gitlab.torproject.org/tpo/core/arti/-/issues/913#note_2914433>
+///
+/// And C Tor's `tor(1)`, which says:
+///
+/// > MaxCircuitDirtiness NUM
+/// >
+/// > Feel free to reuse a circuit that was first used at most NUM
+/// > seconds ago, but never attach a new stream to a circuit that is
+/// > too old.  For hidden services, this applies to the last time a
+/// > circuit was used, not the first.  Circuits with streams
+/// > constructed with SOCKS authentication via SocksPorts that have
+/// > KeepAliveIsolateSOCKSAuth also remain alive for
+/// > MaxCircuitDirtiness seconds after carrying the last such
+/// > stream. (Default: 10 minutes)
+///
+/// However, we're not entirely sure this is the right behaviour.
+/// See <https://gitlab.torproject.org/tpo/core/arti/-/issues/916>
+///
+// TODO SPEC: Explain C Tor `MaxCircuitDirtiness` behaviour
+//
+// TODO HS CFG: This should be configurable somehow
+const RETAIN_CIRCUIT_AFTER_LAST_USE: Duration = Duration::from_secs(10 * 60);
+
+/// How long to retain cached data about a hidden service
+///
+/// This is simply to reclaim space, not for correctness.
+/// So we only check this during housekeeping, not operation.
+///
+/// The starting point for this interval is the last time we used the data,
+/// or a circuit derived from it.
+///
+/// Note that this is a *maximum* for the length of time we will retain a descriptor;
+/// HS descriptors' lifetimes (as declared in the descriptor) *are* honoured;
+/// but that's done by the code in `connect.rs`, not here.
+///
+/// We're not sure this is the right value.
+/// See <https://gitlab.torproject.org/tpo/core/arti/-/issues/916>
+//
+// TODO SPEC: State how long IPT and descriptor data should be retained after use
+//
+// TODO HS CFG: Perhaps this should be configurable somehow?
+const RETAIN_DATA_AFTER_LAST_USE: Duration = Duration::from_secs(48 * 3600 /*hours*/);
 
 /// Hidden services;, our connections to them, and history of connections, etc.
 ///
@@ -71,6 +147,11 @@ const MAX_RECHECKS: u32 = 10;
 pub(crate) struct Services<D: MockableConnectorData> {
     /// The actual records of our connections/attempts for each service, as separated
     records: isol_map::MultikeyIsolatedMap<TableIndex, HsId, HsClientSecretKeys, ServiceState<D>>,
+
+    /// Configuration
+    ///
+    /// `Arc` so that it can be shared with individual hs connector tasks
+    config: Arc<Config>,
 }
 
 /// Entry in the 2nd-level lookup array
@@ -82,7 +163,6 @@ type ServiceRecord<D> = isol_map::Record<HsClientSecretKeys, ServiceState<D>>;
 /// State and history of of our connections, including connection to any connection task.
 ///
 /// `last_used` is used to expire data eventually.
-// TODO HS actually expire old data
 //
 // TODO unify this with channels and circuits.  See arti#778.
 #[derive(Educe)]
@@ -93,7 +173,6 @@ enum ServiceState<D: MockableConnectorData> {
         /// The state
         data: D,
         /// Last time we touched this, including reuse
-        #[allow(dead_code)] // TODO hs remove, when we do expiry
         last_used: Instant,
     },
     /// We have an open circuit, which we can (hopefully) just use
@@ -102,9 +181,21 @@ enum ServiceState<D: MockableConnectorData> {
         data: D,
         /// The circuit
         #[educe(Debug(ignore))]
-        circuit: D::ClientCirc,
+        circuit: Arc<D::ClientCirc>,
         /// Last time we touched this, including reuse
+        ///
+        /// This is set when we created the circuit, and updated when we
+        /// hand out this circuit again in response to a new request.
+        ///
+        /// We believe this mirrors C Tor behaviour;
+        /// see [`RETAIN_CIRCUIT_AFTER_LAST_USE`].
         last_used: Instant,
+        /// We have a task that will close the circuit when required
+        ///
+        /// This field serves to require construction sites of Open
+        /// to demonstrate that there *is* an expiry task.
+        /// In the future, it may also serve to cancel old expiry tasks.
+        circuit_expiry_task: CircuitExpiryTask,
     },
     /// We have a task trying to find the service and establish the circuit
     ///
@@ -133,6 +224,18 @@ impl<D: MockableConnectorData> ServiceState<D> {
 
 /// "Continuation" return type from `obtain_circuit_or_continuation_info`
 type Continuation = (Arc<Mutex<Option<ConnError>>>, postage::barrier::Receiver);
+
+/// Represents a task which is waiting to see when the circuit needs to be expired
+///
+/// TODO: Replace this with a task handle that cancels the task when dropped.
+/// Until then, if the circuit is closed before then, the expiry task will
+/// uselessly wake up some time later.
+#[derive(Debug)] // Not Clone
+struct CircuitExpiryTask {}
+// impl Drop already, partly to allow explicit drop(CircuitExpiryTask) without clippy complaint
+impl Drop for CircuitExpiryTask {
+    fn drop(&mut self) {}
+}
 
 /// Obtain a circuit from the `Services` table, or return a continuation
 ///
@@ -202,7 +305,7 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
     table_index: TableIndex,
     rechecks: &mut impl Iterator,
     mut guard: MutexGuard<'_, Services<D>>,
-) -> Result<Either<Continuation, D::ClientCirc>, ConnError> {
+) -> Result<Either<Continuation, Arc<D::ClientCirc>>, ConnError> {
     let blank_state = || ServiceState::blank(&connector.runtime);
 
     for _recheck in rechecks {
@@ -219,6 +322,7 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
                 data: _,
                 circuit,
                 last_used,
+                circuit_expiry_task: _,
             } => {
                 let now = connector.runtime.now();
                 if !D::circuit_is_ok(circuit) {
@@ -228,6 +332,7 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
                             data,
                             last_used: _,
                             circuit: _,
+                            circuit_expiry_task: _,
                         } => data,
                         _ => panic!("state changed between matches"),
                     };
@@ -238,6 +343,9 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
                     continue;
                 }
                 *last_used = now;
+                // No need to tell expiry task about revised expiry time;
+                // it will see the new last_used when it wakes up at the old expiry time.
+
                 return Ok::<_, ConnError>(Right(circuit.clone()));
             }
             ServiceState::Working {
@@ -287,30 +395,50 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
         // Make a connection
         let runtime = &connector.runtime;
         let connector = (*connector).clone();
+        let config = guard.config.clone();
         let netdir = netdir.clone();
         let secret_keys = secret_keys.clone();
         let hsid = *hsid;
         let connect_future = async move {
             let mut data = data;
 
-            let got =
-                AssertUnwindSafe(D::connect(&connector, netdir, hsid, &mut data, secret_keys))
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| {
-                        data = D::default();
-                        Err(internal!("hidden service connector task panicked!").into())
-                    });
-            let last_used = connector.runtime.now();
+            let got = AssertUnwindSafe(D::connect(
+                &connector,
+                netdir,
+                config,
+                hsid,
+                &mut data,
+                secret_keys,
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                data = D::default();
+                Err(internal!("hidden service connector task panicked!").into())
+            });
+            let now = connector.runtime.now();
+            let last_used = now;
+
+            let got = got.and_then(|circuit| {
+                let circuit_expiry_task = ServiceState::spawn_circuit_expiry_task(
+                    &connector,
+                    hsid,
+                    table_index,
+                    last_used,
+                    now,
+                )
+                .map_err(|cause| ConnError::Spawn {
+                    spawning: "circuit expiry task",
+                    cause: cause.into(),
+                })?;
+                Ok((circuit, circuit_expiry_task))
+            });
+
             let got_error = got.as_ref().map(|_| ()).map_err(Clone::clone);
 
             // block for handling inability to store
             let stored = async {
-                // If we can't record the new state, just panic this task.
-                let mut guard = connector
-                    .services
-                    .lock()
-                    .map_err(|_| internal!("HS connector poisoned"))?;
+                let mut guard = connector.services()?;
                 let record = guard
                     .records
                     .by_index_mut(table_index)
@@ -323,11 +451,12 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
                 };
 
                 match got {
-                    Ok(circuit) => {
+                    Ok((circuit, circuit_expiry_task)) => {
                         *state = ServiceState::Open {
                             data,
                             circuit,
                             last_used,
+                            circuit_expiry_task,
                         }
                     }
                     Err(error) => {
@@ -344,19 +473,17 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
 
             match (got_error, stored) {
                 (Ok::<(), ConnError>(()), Ok::<(), Bug>(())) => {}
-                (Err(got_error), Ok(())) => debug!(
-                    "HS connection failure: {}",
-                    // TODO HS show hs_id,
-                    got_error.report(),
-                ),
+                (Err(got_error), Ok(())) => {
+                    debug!("HS connection failure: {}: {}", hsid, got_error.report(),);
+                }
                 (Ok(()), Err(bug)) => error!(
-                    "internal error storing built HS circuit: {}",
-                    // TODO HS show sv(hs_id),
+                    "internal error storing built HS circuit for {}: {}",
+                    sv(hsid),
                     bug.report(),
                 ),
                 (Err(got_error), Err(bug)) => error!(
-                    "internal error storing HS connection error: {}; {}",
-                    // TODO HS show sv(hs_id),
+                    "internal error storing HS connection error for {}: {}; {}",
+                    sv(hsid),
                     got_error.report(),
                     bug.report(),
                 ),
@@ -375,6 +502,14 @@ fn obtain_circuit_or_continuation_info<D: MockableConnectorData>(
 }
 
 impl<D: MockableConnectorData> Services<D> {
+    /// Create a new empty `Services`
+    pub(crate) fn new(config: Config) -> Self {
+        Services {
+            records: Default::default(),
+            config: Arc::new(config),
+        }
+    }
+
     /// Connect to a hidden service
     // We *do* drop guard.  There is *one* await point, just after drop(guard).
     pub(crate) async fn get_or_launch_connection(
@@ -383,7 +518,7 @@ impl<D: MockableConnectorData> Services<D> {
         hs_id: HsId,
         isolation: Box<dyn Isolation>,
         secret_keys: HsClientSecretKeys,
-    ) -> Result<D::ClientCirc, ConnError> {
+    ) -> Result<Arc<D::ClientCirc>, ConnError> {
         let blank_state = || ServiceState::blank(&connector.runtime);
 
         let mut rechecks = 0..MAX_RECHECKS;
@@ -403,10 +538,7 @@ impl<D: MockableConnectorData> Services<D> {
         let mut got;
         let table_index;
         {
-            let mut guard = connector
-                .services
-                .lock()
-                .map_err(|_| internal!("HS connector poisoned"))?;
+            let mut guard = connector.services()?;
             let services = &mut *guard;
 
             trace!("HS conn get_or_launch: {hs_id:?} {isolation:?} {secret_keys:?}");
@@ -445,13 +577,109 @@ impl<D: MockableConnectorData> Services<D> {
                 }
             }
 
-            let guard = connector
-                .services
-                .lock()
-                .map_err(|_| internal!("HS connector poisoned (relock)"))?;
+            let guard = connector.services()?;
 
             got = obtain(table_index, guard);
         }
+    }
+
+    /// Perform housekeeping - delete data we aren't interested in any more
+    pub(crate) fn run_housekeeping(&mut self, now: Instant) {
+        self.expire_old_data(now);
+    }
+
+    /// Delete data we aren't interested in any more
+    fn expire_old_data(&mut self, now: Instant) {
+        self.records.retain(|hsid, record, _table_index| match &**record {
+            ServiceState::Closed {
+                data: _,
+                last_used,
+            } => {
+                let Some(expiry_time) = last_used.checked_add(RETAIN_DATA_AFTER_LAST_USE) else { return false; };
+                now <= expiry_time
+            },
+            ServiceState::Open { .. } |
+            ServiceState::Working { .. } => true,
+            ServiceState::Dummy { .. } => {
+                error!("found dummy data during HS housekeeping, for {}", sv(hsid));
+                false
+            }
+        });
+    }
+}
+
+impl<D: MockableConnectorData> ServiceState<D> {
+    /// Spawn a task that will drop our reference to the rendezvous circuit
+    /// at `table_index` when it has gone too long without any use.
+    ///
+    /// According to [`RETAIN_CIRCUIT_AFTER_LAST_USE`].
+    //
+    // As it happens, this function is always called with `last_used` equal to `now`,
+    // but we pass separate arguments for clarity.
+    fn spawn_circuit_expiry_task(
+        connector: &HsClientConnector<impl Runtime, D>,
+        hsid: HsId,
+        table_index: TableIndex,
+        last_used: Instant,
+        now: Instant,
+    ) -> Result<CircuitExpiryTask, SpawnError> {
+        /// Returns the duration until expiry, or `None` if it should expire now
+        fn calculate_expiry_wait(last_used: Instant, now: Instant) -> Option<Duration> {
+            let expiry = last_used
+                .checked_add(RETAIN_CIRCUIT_AFTER_LAST_USE)
+                .or_else(|| {
+                    error!("time overflow calculating HS circuit expiry, killing circuit!");
+                    None
+                })?;
+            let wait = expiry.checked_duration_since(now)?;
+            Some(wait)
+        }
+
+        let mut maybe_wait = calculate_expiry_wait(last_used, now);
+        let () = connector.runtime.spawn({
+            let connector = connector.clone();
+            async move {
+                // This loop is slightly odd.  The wait ought naturally to be at the end,
+                // but that would mean a useless re-lock and re-check right after creation,
+                // or jumping into the middle of the loop.
+                loop {
+                    if let Some(yes_wait) = maybe_wait {
+                        connector.runtime.sleep(yes_wait).await;
+                    }
+                    // If it's None, we can't rely on that to say we should expire it,
+                    // since that information crossed a time when we didn't hold the lock.
+
+                    let Ok(mut guard) = connector.services() else { break };
+                    let Some(record) = guard.records.by_index_mut(table_index) else { break };
+                    let state = &mut **record;
+                    let last_used = match state {
+                        ServiceState::Closed { .. } => break,
+                        ServiceState::Open { last_used, .. } => *last_used,
+                        ServiceState::Working { .. } => break, // someone else will respawn
+                        ServiceState::Dummy => break,          // someone else will (report and) fix
+                    };
+                    maybe_wait = calculate_expiry_wait(last_used, connector.runtime.now());
+                    if maybe_wait.is_none() {
+                        match mem::replace(state, ServiceState::Dummy) {
+                            ServiceState::Open {
+                                data,
+                                circuit,
+                                last_used,
+                                circuit_expiry_task,
+                            } => {
+                                debug!("HS connection expires: {hsid}");
+                                drop(circuit);
+                                drop(circuit_expiry_task); // that's us
+                                *state = ServiceState::Closed { data, last_used };
+                                break;
+                            }
+                            _ => panic!("state now {state:?} even though we just saw it Open"),
+                        }
+                    }
+                }
+            }
+        })?;
+        Ok(CircuitExpiryTask {})
     }
 }
 
@@ -466,7 +694,7 @@ impl<D: MockableConnectorData> Services<D> {
 #[async_trait]
 pub trait MockableConnectorData: Default + Debug + Send + Sync + 'static {
     /// Client circuit
-    type ClientCirc: Clone + Sync + Send + 'static;
+    type ClientCirc: Sync + Send + 'static;
 
     /// Mock state
     type MockGlobalState: Clone + Sync + Send + 'static;
@@ -475,10 +703,11 @@ pub trait MockableConnectorData: Default + Debug + Send + Sync + 'static {
     async fn connect<R: Runtime>(
         connector: &HsClientConnector<R, Self>,
         netdir: Arc<NetDir>,
+        config: Arc<Config>,
         hsid: HsId,
         data: &mut Self,
         secret_keys: HsClientSecretKeys,
-    ) -> Result<Self::ClientCirc, ConnError>;
+    ) -> Result<Arc<Self::ClientCirc>, ConnError>;
 
     /// Is circuit OK?  Ie, not `.is_closing()`.
     fn circuit_is_ok(circuit: &Self::ClientCirc) -> bool;
@@ -499,17 +728,19 @@ pub(crate) mod test {
     use super::*;
     use crate::*;
     use futures::{poll, SinkExt};
+    use std::fmt;
     use std::task::Poll::{self, *};
     use tokio::pin;
     use tokio_crate as tokio;
-    use tor_rtcompat::test_with_one_runtime;
+    use tor_rtcompat::{test_with_one_runtime, SleepProvider};
+    use tor_rtmock::MockSleepRuntime;
     use tracing_test::traced_test;
 
     use ConnError as E;
 
     #[derive(Debug, Default)]
     struct MockData {
-        // things will appear here when we have more sophisticated tests
+        connect_called: usize,
     }
 
     /// Type indicating what our `connect()` should return; it always makes a fresh MockCirc
@@ -521,9 +752,23 @@ pub(crate) mod test {
         give: postage::watch::Receiver<MockGive>,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Educe)]
+    #[educe(Debug)]
     struct MockCirc {
+        #[educe(Debug(method = "debug_arc_mutex"))]
         ok: Arc<Mutex<bool>>,
+        connect_called: usize,
+    }
+
+    fn debug_arc_mutex(val: &Arc<Mutex<impl Debug>>, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "@{:?}", Arc::as_ptr(val))?;
+        let guard = val.lock();
+        let guard = guard.or_else(|g| {
+            write!(f, ",POISON")?;
+            Ok::<_, fmt::Error>(g.into_inner())
+        })?;
+        write!(f, " ")?;
+        Debug::fmt(&*guard, f)
     }
 
     impl PartialEq for MockCirc {
@@ -533,9 +778,9 @@ pub(crate) mod test {
     }
 
     impl MockCirc {
-        fn new() -> Self {
+        fn new(connect_called: usize) -> Self {
             let ok = Arc::new(Mutex::new(true));
-            MockCirc { ok }
+            MockCirc { ok, connect_called }
         }
     }
 
@@ -547,11 +792,16 @@ pub(crate) mod test {
         async fn connect<R: Runtime>(
             connector: &HsClientConnector<R, MockData>,
             _netdir: Arc<NetDir>,
+            _config: Arc<Config>,
             _hsid: HsId,
-            _data: &mut MockData,
+            data: &mut MockData,
             _secret_keys: HsClientSecretKeys,
-        ) -> Result<Self::ClientCirc, E> {
-            let make = |()| MockCirc::new();
+        ) -> Result<Arc<Self::ClientCirc>, E> {
+            data.connect_called += 1;
+            let make = {
+                let connect_called = data.connect_called;
+                move |()| Arc::new(MockCirc::new(connect_called))
+            };
             let mut give = connector.mock_for_state.give.clone();
             if let Ready(ret) = &*give.borrow() {
                 return ret.clone().map(make);
@@ -573,9 +823,11 @@ pub(crate) mod test {
     fn mk_keys(kk: u8) -> HsClientSecretKeys {
         let mut ss = [0_u8; 32];
         ss[0] = kk;
-        let ss = tor_llcrypto::pk::ed25519::SecretKey::from_bytes(&ss).unwrap();
+        let secret = tor_llcrypto::pk::ed25519::SecretKey::from_bytes(&ss).unwrap();
+        let public = tor_llcrypto::pk::ed25519::PublicKey::from(&secret);
+        let kp = tor_llcrypto::pk::ed25519::Keypair { public, secret };
         let mut b = HsClientSecretKeysBuilder::default();
-        b.ks_hsc_intro_auth(ss.into());
+        b.ks_hsc_intro_auth(kp.into());
         b.build().unwrap()
     }
 
@@ -630,7 +882,7 @@ pub(crate) mod test {
         id: u8,
         secret_keys: &HsClientSecretKeys,
         isolation: Option<NarrowableIsolation>,
-    ) -> Result<MockCirc, ConnError> {
+    ) -> Result<Arc<MockCirc>, ConnError> {
         let netdir = tor_netdir::testnet::construct_netdir()
             .unwrap_if_sufficient()
             .unwrap();
@@ -673,6 +925,71 @@ pub(crate) mod test {
 
             let circuit = launch_one(&hsconn, 0, &keys, None).await.unwrap();
             eprintln!("{:?}", circuit);
+        });
+    }
+
+    #[test]
+    #[traced_test]
+    fn expiry() {
+        test_with_one_runtime!(|outer_runtime| async move {
+            let runtime = MockSleepRuntime::new(outer_runtime.clone());
+
+            // We sleep this actual amount, with the real runtime, when we want to yield
+            // for long enough for some other task to do whatever it needs to.
+            // This represents an actual delay to the real test run.
+            const BODGE_YIELD: Duration = Duration::from_millis(125);
+
+            // This is the amount by which we adjust clock advances to make sure we
+            // hit more or less than a particular value, to avoid edge cases and
+            // cope with real time advancing too.
+            // This does *not* represent an actual delay to real test runs.
+            const TIMEOUT_SLOP: Duration = Duration::from_secs(10);
+
+            let (hsconn, keys, _give_send) = mk_hsconn(runtime.clone());
+
+            let advance = |duration| {
+                let hsconn = hsconn.clone();
+                let runtime = &runtime;
+                let outer_runtime = &outer_runtime;
+                async move {
+                    // let expiry task get going and choose its expiry (wakeup) time
+                    outer_runtime.sleep(BODGE_YIELD).await;
+                    runtime.advance(duration).await;
+                    // let expiry task run
+                    outer_runtime.sleep(BODGE_YIELD).await;
+                    hsconn.services().unwrap().run_housekeeping(runtime.now());
+                }
+            };
+
+            // make circuit1
+            let circuit1 = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+
+            // expire it
+            advance(RETAIN_CIRCUIT_AFTER_LAST_USE + TIMEOUT_SLOP).await;
+
+            // make circuit2 (a)
+            let circuit2a = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+            assert_ne!(circuit1, circuit2a);
+
+            // nearly expire it, then reuse it
+            advance(RETAIN_CIRCUIT_AFTER_LAST_USE - TIMEOUT_SLOP).await;
+            let circuit2b = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+            assert_eq!(circuit2a, circuit2b);
+
+            // nearly expire it again, then reuse it
+            advance(RETAIN_CIRCUIT_AFTER_LAST_USE - TIMEOUT_SLOP).await;
+            let circuit2c = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+            assert_eq!(circuit2a, circuit2c);
+
+            // actually expire it
+            advance(RETAIN_CIRCUIT_AFTER_LAST_USE + TIMEOUT_SLOP).await;
+            let circuit3 = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+            assert_ne!(circuit2c, circuit3);
+            assert_eq!(circuit3.connect_called, 3);
+
+            advance(RETAIN_DATA_AFTER_LAST_USE + Duration::from_secs(10)).await;
+            let circuit4 = launch_one(&hsconn, 0, &keys, None).await.unwrap();
+            assert_eq!(circuit4.connect_called, 1);
         });
     }
 

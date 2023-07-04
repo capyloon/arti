@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -77,6 +79,21 @@ pub struct Subcredential([u8; 32]);
 )]
 pub struct RevisionCounter(u64);
 
+/// Default number of introduction points a service should establish
+///
+/// Default value for `[NUM_INTRO_POINT]`, rend-spec-v3 2.5.4.
+//
+// TODO arguably these aren't "crypto" so should be in some currently non-existent tor-hscommon
+pub const NUM_INTRO_POINT_DEF: usize = 3;
+
+/// Maximum number of introduction points a service should establish and we should tolerate
+///
+/// Maximum value for `[NUM_INTRO_POINT]`, rend-spec-v3 2.5.4.
+pub const NUM_INTRO_POINT_MAX: usize = 20;
+
+/// Length of a `RENDEZVOUS` cookie
+const REND_COOKIE_LEN: usize = 20;
+
 define_bytes! {
 /// An opaque value `RENDEZVOUS_COOKIE` used at a rendezvous point to match clients and services.
 ///
@@ -86,5 +103,11 @@ define_bytes! {
 /// `ESTABLISH_RENDEZVOUS` message; the service later provides the same value in its
 /// `RENDEZVOUS1` message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RendCookie([u8; 20]);
+pub struct RendCookie([u8; REND_COOKIE_LEN]);
+}
+
+impl rand::distributions::Distribution<RendCookie> for rand::distributions::Standard {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> RendCookie {
+        RendCookie(rng.gen::<[u8; REND_COOKIE_LEN]>().into())
+    }
 }

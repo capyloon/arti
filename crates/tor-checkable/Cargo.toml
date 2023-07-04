@@ -1,9 +1,9 @@
 [package]
 name = "tor-checkable"
-version = "0.4.3"
+version = "0.5.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Types to ensure that signed or time-bound data is validated before use"
@@ -13,13 +13,15 @@ repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
 
 [features]
 experimental = ["experimental-api"]
-experimental-api = []
+experimental-api = ["__is_experimental"]
+full = ["tor-llcrypto/full"]
+__is_experimental = []
 
 [dependencies]
 humantime = "2"
 signature = "1"
 thiserror = "1"
-tor-llcrypto = { path = "../tor-llcrypto", version = "0.4.3" }
+tor-llcrypto = { path = "../tor-llcrypto", version = "0.5.2" }
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

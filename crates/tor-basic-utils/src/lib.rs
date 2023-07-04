@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -44,6 +46,7 @@ use std::mem;
 
 pub mod iter;
 pub mod n_key_set;
+pub mod rangebounds;
 pub mod retry;
 pub mod test_rng;
 
@@ -253,6 +256,88 @@ macro_rules! macro_first_nonempty {
     { [ $($yes:tt)+ ] $($rhs:tt)* } => { $($yes)* };
     { [ ]$(,)? [ $($otherwise:tt)* ] $($rhs:tt)* } => {
         $crate::macro_first_nonempty!{ [ $($otherwise)* ] $($rhs)* }
+    };
+}
+
+// ----------------------------------------------------------------------
+
+/// Define `Debug` to print as hex
+///
+/// # Usage
+///
+/// ```ignore
+/// impl_debug_hex! { $type }
+/// impl_debug_hex! { $type . $field_accessor }
+/// impl_debug_hex! { $type , $accessor_fn }
+/// ```
+///
+/// By default, this expects `$type` to implement `AsRef<[u8]>`.
+///
+/// Or, you can supply a series of tokens `$field_accessor`,
+/// which will be used like this: `self.$field_accessor.as_ref()`
+/// to get a `&[u8]`.
+///
+/// Or, you can supply `$accessor: fn(&$type) -> &[u8]`.
+///
+/// # Examples
+///
+/// ```
+/// use tor_basic_utils::impl_debug_hex;
+/// #[derive(Default)]
+/// struct FourBytes([u8; 4]);
+/// impl AsRef<[u8]> for FourBytes { fn as_ref(&self) -> &[u8] { &self.0 } }
+/// impl_debug_hex! { FourBytes }
+///
+/// assert_eq!(
+///     format!("{:?}", FourBytes::default()),
+///     "FourBytes(00000000)",
+/// );
+/// ```
+///
+/// ```
+/// use tor_basic_utils::impl_debug_hex;
+/// #[derive(Default)]
+/// struct FourBytes([u8; 4]);
+/// impl_debug_hex! { FourBytes .0 }
+///
+/// assert_eq!(
+///     format!("{:?}", FourBytes::default()),
+///     "FourBytes(00000000)",
+/// );
+/// ```
+///
+/// ```
+/// use tor_basic_utils::impl_debug_hex;
+/// struct FourBytes([u8; 4]);
+/// impl_debug_hex! { FourBytes, |self_| &self_.0 }
+///
+/// assert_eq!(
+///     format!("{:?}", FourBytes([1,2,3,4])),
+///     "FourBytes(01020304)",
+/// )
+/// ```
+#[macro_export]
+macro_rules! impl_debug_hex {
+    { $type:ty $(,)? } => {
+        $crate::impl_debug_hex! { $type, |self_| <$type as AsRef<[u8]>>::as_ref(&self_) }
+    };
+    { $type:ident . $($accessor:tt)+ } => {
+        $crate::impl_debug_hex! { $type, |self_| self_ . $($accessor)* .as_ref() }
+    };
+    { $type:ty, $obtain:expr $(,)? } => {
+        impl std::fmt::Debug for $type {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                use std::fmt::Write;
+                let obtain: fn(&$type) -> &[u8] = $obtain;
+                let bytes: &[u8] = obtain(self);
+                write!(f, "{}(", stringify!($type))?;
+                for b in bytes {
+                    write!(f, "{:02x}", b)?;
+                }
+                write!(f, ")")?;
+                Ok(())
+            }
+        }
     };
 }
 

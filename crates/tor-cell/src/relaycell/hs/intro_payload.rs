@@ -1,17 +1,14 @@
 //! The encrypted portion of an INTRODUCE{1,2} message.
 //!
 //! (This is as described as the "decrypted plaintext" in section 3.3 of
-//! rend-spec-v3.txt; it is )
-//!
-//! TODO HS: maybe rename this module.
-//!
-//! TODO HS: Maybe this doesn't belong in tor-cell.
+//! rend-spec-v3.txt.  It tells the onion service how to find the rendezvous
+//! point, and how to handshake with the client there.)
 
 use super::ext::{decl_extension_group, ExtGroup, ExtList, UnrecognizedExt};
 use caret::caret_int;
 use tor_bytes::{EncodeError, EncodeResult, Error, Readable, Reader, Result, Writeable, Writer};
 use tor_hscrypto::RendCookie;
-use tor_linkspec::UnparsedLinkSpec;
+use tor_linkspec::EncodedLinkSpec;
 
 caret_int! {
     /// Type code for an extension in an [`IntroduceHandshakePayload`].
@@ -48,10 +45,10 @@ caret_int! {
 ///
 /// Corresponds to `ONION_KEY` in the spec.
 //
-// TODO HS: Is there a logical type somewhere else to coalesce this with?
+// TODO: Is there a logical type somewhere else to coalesce this with?
 // Currently there is no wrapper around curve25519::PublicKey when it's used as
 // an Ntor key, nor is there (yet) a generic onion key enum.  tor-linkspec might be
-// the logical place for those.
+// the logical place for those.  See arti#893.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum OnionKey {
@@ -120,7 +117,7 @@ pub struct IntroduceHandshakePayload {
     /// A list of link specifiers to identify the rendezvous point.
     ///
     /// (`NSPEC`, `LSTYPE`, `LSLEN`, and `LSPEC` in the spec.)
-    link_specifiers: Vec<UnparsedLinkSpec>,
+    link_specifiers: Vec<EncodedLinkSpec>,
 }
 
 impl Readable for IntroduceHandshakePayload {
@@ -161,7 +158,7 @@ impl IntroduceHandshakePayload {
     pub fn new(
         cookie: RendCookie,
         onion_key: OnionKey,
-        link_specifiers: Vec<UnparsedLinkSpec>,
+        link_specifiers: Vec<EncodedLinkSpec>,
     ) -> Self {
         let extensions = ExtList::default();
         Self {

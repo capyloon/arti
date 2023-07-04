@@ -1,9 +1,9 @@
 [package]
 name = "tor-basic-utils"
-version = "0.6.0"
+version = "0.7.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "General helpers used by Tor"
@@ -27,6 +27,9 @@ libc = { version = "0.2", default-features = false }
 derive_more = "0.99.3"
 educe = "0.4.6"
 serde = { version = "1.0.103", features = ["derive"] }
+
+[features]
+full = []
 
 [package.metadata.docs.rs]
 all-features = true

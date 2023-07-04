@@ -1,9 +1,9 @@
 [package]
 name = "tor-async-utils"
-version = "0.0.1"
+version = "0.1.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Async/futures helpers for use with Tor"
@@ -21,5 +21,7 @@ void = "1"
 
 [dev-dependencies]
 futures-await-test = "0.3.0"
-tokio = { version = "1.7", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1.7", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
 
+[features]
+full = []

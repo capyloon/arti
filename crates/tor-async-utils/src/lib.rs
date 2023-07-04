@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -38,9 +40,15 @@
 #![allow(clippy::result_large_err)] // temporary workaround for arti#587
 //! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 
+mod join_read_write;
+mod prepare_send;
 mod sinkext;
 mod watch;
 
-pub use sinkext::{SinkExt, SinkPrepareSendFuture, SinkSendable};
+pub use join_read_write::*;
+
+pub use prepare_send::{SinkPrepareExt, SinkPrepareSendFuture, SinkSendable};
+
+pub use sinkext::SinkExt;
 
 pub use watch::{DropNotifyEofSignallable, DropNotifyWatchSender, PostageWatchSenderExt};

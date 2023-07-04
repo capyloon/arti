@@ -13,14 +13,14 @@
 //! position or later. ("N" is a "number of replicas" parameter, and "S" is a
 //! "Spread" parameter.)
 
-#![allow(unused_variables, dead_code)] //TODO hs: remove
-
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 use derive_more::{AsRef, From, Into};
 use digest::Digest;
 use typed_index_collections::TiVec;
 
+use tor_basic_utils::impl_debug_hex;
 use tor_hscrypto::{pk::HsBlindId, time::TimePeriod};
 use tor_llcrypto::d::Sha3_256;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
@@ -41,8 +41,10 @@ use crate::{NetDir, RouterStatusIdx};
 ///
 /// Note that this is _not_ an index into any array; it is instead an index into
 /// a space of possible values in a (virtual!) ring of 2^256 elements.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, AsRef)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, AsRef)]
 pub(crate) struct HsDirIndex(#[as_ref] [u8; 32]);
+
+impl_debug_hex! { HsDirIndex .0 }
 
 /// Position in the hsdir hash ring
 ///
@@ -142,7 +144,7 @@ impl HsDirRing {
         this_netdir: &NetDir,
         prev_netdir: Option<&NetDir>,
     ) -> Self {
-        // TODO hs: The ring itself can be a bit expensive to compute, so maybe we should
+        // TODO: The ring itself can be a bit expensive to compute, so maybe we should
         // make sure this happens in a separate task or something, and expose a
         // way to do that?
         // But: this is being done during netdir ingestion, which is already happening
@@ -204,6 +206,11 @@ impl HsDirRing {
         }
     }
 
+    /// Return the parameters used for this ring
+    pub(crate) fn params(&self) -> &HsDirParams {
+        &self.params
+    }
+
     /// Find the location or (notional) insertion point for `hsdir_index` within `ring`.
     fn find_pos(&self, hsdir_index: HsDirIndex) -> HsDirPos {
         self.ring
@@ -211,14 +218,22 @@ impl HsDirRing {
             .unwrap_or_else(|pos| pos)
     }
 
-    /// Yield items from `ring` starting with `hsdir_index`, wrapping around once when we
-    /// reach the end, and yielding no element more than once.
+    /// Yield `spread_fetch` items from `ring` starting with `hsdir_index`
+    ///
+    /// Wraps around once when we
+    /// reach the end.
+    ///
+    /// Yields no element more than once, even if the ring is smaller than `spread_fetch`.
     pub(crate) fn ring_items_at(
         &self,
         hsdir_index: HsDirIndex,
+        spread: usize,
     ) -> impl Iterator<Item = &(HsDirIndex, RouterStatusIdx)> {
         let pos = self.find_pos(hsdir_index);
-        self.ring[pos..].iter().chain(&self.ring[..pos])
+        self.ring[pos..]
+            .iter()
+            .chain(&self.ring[..pos])
+            .take(spread)
     }
 
     /// Return the time period for which this ring applies.

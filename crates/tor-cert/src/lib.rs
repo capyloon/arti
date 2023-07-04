@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -148,10 +150,6 @@ caret_int! {
         SHA256_OF_RSA = 0x02,
         /// Identifies the SHA256 of an X.509 certificate.
         SHA256_OF_X509 = 0x03,
-
-        // 08 through 09 and 0B are used for onion services.  They
-        // probably shouldn't be, but that's what Tor does.
-        // TODO hs: Add these types.
     }
 }
 
@@ -196,8 +194,6 @@ pub enum CertifiedKey {
     X509Sha256Digest([u8; 32]),
     /// Some unrecognized key type.
     Unrecognized(UnrecognizedKey),
-    // TODO hs: Add new alternatives here for the case that we're handling key types from
-    // onion services.  These will correspond to types in tor-hscrypto.
 }
 
 /// A key whose type we didn't recognize.
@@ -301,9 +297,9 @@ impl Readable for CertExt {
 
         Ok(match ext_type {
             ExtType::SIGNED_WITH_ED25519_KEY => CertExt::SignedWithEd25519(SignedWithEd25519Ext {
-                pk: ed25519::Ed25519Identity::from_bytes(body).ok_or(
-                    BytesError::InvalidMessage("wrong length on Ed25519 key".into()),
-                )?,
+                pk: ed25519::Ed25519Identity::from_bytes(body).ok_or_else(|| {
+                    BytesError::InvalidMessage("wrong length on Ed25519 key".into())
+                })?,
             }),
             _ => {
                 if (flags & 1) != 0 {
@@ -419,6 +415,12 @@ impl Ed25519Cert {
 
 /// A parsed Ed25519 certificate. Maybe it includes its signing key;
 /// maybe it doesn't.
+///
+/// To validate this cert, either it must contain its signing key,
+/// or the caller must know the signing key.  In the first case, call
+/// [`should_have_signing_key`](KeyUnknownCert::should_have_signing_key);
+/// in the latter, call
+/// [`should_be_signed_with`](KeyUnknownCert::should_be_signed_with).
 #[derive(Clone, Debug)]
 pub struct KeyUnknownCert {
     /// The certificate whose signing key might not be known.
@@ -438,16 +440,57 @@ impl KeyUnknownCert {
     /// Check whether a given pkey is (or might be) a key that has correctly
     /// signed this certificate.
     ///
+    /// If pkey is None, this certificate must contain its signing key.
+    ///
     /// On success, we can check whether the certificate is well-signed;
     /// otherwise, we can't check the certificate.
+    #[deprecated(
+        since = "0.7.1",
+        note = "Use should_have_signing_key or should_be_signed_with instead."
+    )]
     pub fn check_key(self, pkey: Option<&ed25519::Ed25519Identity>) -> CertResult<UncheckedCert> {
-        let real_key = match (pkey, self.cert.cert.signed_with) {
-            (Some(a), Some(b)) if a == &b => b,
-            (Some(_), Some(_)) => return Err(CertError::KeyMismatch),
-            (Some(a), None) => *a,
-            (None, Some(b)) => b,
-            (None, None) => return Err(CertError::MissingPubKey),
+        match pkey {
+            Some(wanted) => self.should_be_signed_with(wanted),
+            None => self.should_have_signing_key(),
+        }
+    }
+
+    /// Declare that this should be a self-contained certificate that contains its own
+    /// signing key.
+    ///
+    /// On success, this certificate did indeed turn out to be self-contained, and so
+    /// we can validate it.
+    /// On failure, this certificate was not self-contained.
+    pub fn should_have_signing_key(self) -> CertResult<UncheckedCert> {
+        let real_key = match &self.cert.cert.signed_with {
+            Some(a) => *a,
+            None => return Err(CertError::MissingPubKey),
         };
+
+        Ok(UncheckedCert {
+            cert: Ed25519Cert {
+                signed_with: Some(real_key),
+                ..self.cert.cert
+            },
+            ..self.cert
+        })
+    }
+
+    /// Declare that this should be a certificate signed with a given key.
+    ///
+    /// On success, this certificate either listed the provided key, or did not
+    /// list any key: in either case, we can validate it.
+    /// On failure, this certificate claims to be signed with a different key.
+    pub fn should_be_signed_with(
+        self,
+        pkey: &ed25519::Ed25519Identity,
+    ) -> CertResult<UncheckedCert> {
+        let real_key = match &self.cert.cert.signed_with {
+            Some(a) if a == pkey => *pkey,
+            None => *pkey,
+            Some(_) => return Err(CertError::KeyMismatch),
+        };
+
         Ok(UncheckedCert {
             cert: Ed25519Cert {
                 signed_with: Some(real_key),

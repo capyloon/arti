@@ -1,16 +1,16 @@
 //! Types and functions for onion service descriptor encryption.
-//!
-//! TODO hs: It's possible that this should move to tor-netdoc.
 
 use tor_hscrypto::{pk::HsBlindId, RevisionCounter, Subcredential};
 use tor_llcrypto::cipher::aes::Aes256Ctr as Cipher;
 use tor_llcrypto::d::Sha3_256 as Hash;
 use tor_llcrypto::d::Shake256 as KDF;
 
-use arrayref::array_ref;
 use cipher::{KeyIvInit, StreamCipher};
 use digest::{ExtendableOutput, FixedOutput, Update, XofReader};
+#[cfg(any(test, feature = "hs-service"))]
 use rand::{CryptoRng, Rng};
+use tor_llcrypto::pk::curve25519::PublicKey;
+use tor_llcrypto::pk::curve25519::StaticSecret;
 use tor_llcrypto::util::ct::CtByteArray;
 use zeroize::Zeroizing as Z;
 
@@ -62,8 +62,6 @@ pub(super) struct HsDescEncNonce([u8; HS_DESC_ENC_NONCE_LEN]);
 const SALT_LEN: usize = 16;
 /// Length of our ersatz MAC.
 const MAC_LEN: usize = 32;
-/// An instance of our cryptographic salt.
-type Salt = [u8; SALT_LEN];
 
 impl<'a> HsDescEncryption<'a> {
     /// Length of our MAC key.
@@ -74,6 +72,7 @@ impl<'a> HsDescEncryption<'a> {
     const IV_LEN: usize = 16;
 
     /// Encrypt a given bytestring using these encryption parameters.
+    #[cfg(any(test, feature = "hs-service"))]
     pub(super) fn encrypt<R: Rng + CryptoRng>(&self, rng: &mut R, data: &[u8]) -> Vec<u8> {
         let output_len = data.len() + SALT_LEN + MAC_LEN;
         let mut output = Vec::with_capacity(output_len);
@@ -86,7 +85,7 @@ impl<'a> HsDescEncryption<'a> {
         cipher.apply_keystream(&mut output[SALT_LEN..]);
         mac.update(&output[SALT_LEN..]);
         let mut mac_val = Default::default();
-        let mac = mac.finalize_into(&mut mac_val);
+        mac.finalize_into(&mut mac_val);
         output.extend_from_slice(&mac_val);
         debug_assert_eq!(output.len(), output_len);
 
@@ -100,10 +99,15 @@ impl<'a> HsDescEncryption<'a> {
         }
         let msg_len = data.len() - SALT_LEN - MAC_LEN;
 
-        let salt = *array_ref![data, 0, SALT_LEN];
+        let salt = data[0..SALT_LEN]
+            .try_into()
+            .expect("Failed try_into for 16-byte array.");
         let ciphertext = &data[SALT_LEN..(SALT_LEN + msg_len)];
 
-        let expected_mac = CtByteArray::from(*array_ref![data, SALT_LEN + msg_len, MAC_LEN]);
+        let expected_mac = CtByteArray::from(
+            <[u8; MAC_LEN]>::try_from(&data[SALT_LEN + msg_len..SALT_LEN + msg_len + MAC_LEN])
+                .expect("Failed try_into for 32-byte array."),
+        );
         let (mut cipher, mut mac) = self.init(&salt);
 
         // check mac.
@@ -135,7 +139,7 @@ impl<'a> HsDescEncryption<'a> {
 
         let mut key = Z::new([0_u8; Self::CIPHER_KEY_LEN]);
         let mut iv = Z::new([0_u8; Self::IV_LEN]);
-        let mut mac_key = Z::new([0_u8; Self::MAC_KEY_LEN]); // TODO HS conjectural!
+        let mut mac_key = Z::new([0_u8; Self::MAC_KEY_LEN]);
         key_stream.read(&mut key[..]);
         key_stream.read(&mut iv[..]);
         key_stream.read(&mut mac_key[..]);
@@ -186,6 +190,41 @@ impl<'a> HsDescEncryption<'a> {
 #[derive(Clone, Debug, Default, thiserror::Error)]
 #[error("Unable to decrypt onion service descriptor.")]
 pub struct DecryptionError {}
+
+/// Create the CLIENT-ID and COOKIE-KEY required for hidden service client auth.
+///
+/// This is used by HS clients to decrypt the descriptor cookie from the onion service descriptor,
+/// and by HS services to build the client-auth sections of descriptors.
+///
+/// Section 2.5.1.2. of rend-spec-v3 says:
+/// ```text
+///     SECRET_SEED = x25519(hs_y, client_X)
+///                 = x25519(client_y, hs_X)
+///     KEYS = KDF(N_hs_subcred | SECRET_SEED, 40)
+///     CLIENT-ID = first 8 bytes of KEYS
+///     COOKIE-KEY = last 32 bytes of KEYS
+///
+/// Where:
+///     hs_{X,y} = K{P,S}_hss_desc_enc
+///     client_{X,Y} = K{P,S}_hsc_desc_enc
+/// ```
+pub(crate) fn build_descriptor_cookie_key(
+    our_secret_key: &StaticSecret,
+    their_public_key: &PublicKey,
+    subcredential: &Subcredential,
+) -> (CtByteArray<8>, [u8; 32]) {
+    let secret_seed = our_secret_key.diffie_hellman(their_public_key);
+    let mut kdf = KDF::default();
+    kdf.update(subcredential.as_ref());
+    kdf.update(secret_seed.as_bytes());
+    let mut keys = kdf.finalize_xof();
+    let mut client_id = CtByteArray::from([0_u8; 8]);
+    let mut cookie_key = [0_u8; 32];
+    keys.read(client_id.as_mut());
+    keys.read(&mut cookie_key);
+
+    (client_id, cookie_key)
+}
 
 #[cfg(test)]
 mod test {

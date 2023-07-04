@@ -16,7 +16,7 @@
 use crate::parse::keyword::Keyword;
 use crate::parse::rules::*;
 use crate::parse::tokenize::*;
-use crate::{ParseErrorKind as EK, Result};
+use crate::{NetdocErrorKind as EK, Result};
 
 use educe::Educe;
 
@@ -183,7 +183,7 @@ impl<T: Keyword> SectionRulesBuilder<T> {
     /// Explicitly reject any unrecognized tokens.
     ///
     /// To avoid errors, you must either explicitly reject unrecognized tokens,
-    /// or you must define how they are handled.  
+    /// or you must define how they are handled.
     pub(crate) fn reject_unrecognized(&mut self) {
         self.strict = true;
     }
@@ -320,7 +320,7 @@ mod test {
     use crate::parse::keyword::Keyword;
     use crate::parse::macros::test::Fruit;
     use crate::parse::tokenize::{Item, NetDocReader};
-    use crate::{Error, ParseErrorKind as EK, Result};
+    use crate::{Error, NetdocErrorKind as EK, Result};
     use once_cell::sync::Lazy;
 
     /// Rules for parsing a set of router annotations.
@@ -381,7 +381,7 @@ lemon
                 .unwrap()
                 .obj("ORANGE MANIFESTO")
                 .unwrap_err()
-                .parse_error_kind(),
+                .netdoc_error_kind(),
             EK::MissingObject // orange you glad there isn't a manifesto?
         ));
 

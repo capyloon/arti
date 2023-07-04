@@ -1,9 +1,9 @@
 [package]
 name = "tor-rtcompat"
-version = "0.8.2"
+version = "0.9.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Compatibility layer for asynchronous runtimes, used by Tor"
@@ -18,24 +18,28 @@ full = ["async-std", "tokio", "native-tls"]
 
 async-std = ["async-std-crate", "async-io", "async_executors/async_std"]
 tokio = ["tokio-crate", "tokio-util", "async_executors/tokio_tp"]
-static = ["native-tls-crate?/vendored"]
+static = ["native-tls-crate?/vendored", "__is_nonadditive"]
 native-tls = ["native-tls-crate", "async-native-tls"]
-rustls = ["rustls-crate", "async-rustls", "x509-signature"]
+
+# This is not nonadditive from a software POV, but we mark it as such because it
+# includes code licensed under the old OpenSSL license (which was 4-clause BSD),
+# which in turn introduces a GPL-incompatibility.
+rustls = ["rustls-crate", "async-rustls", "x509-signature", "__is_nonadditive"]
+
+__is_nonadditive = []
 
 [dependencies]
 async-io = { version = "1.4.1", optional = true }
 async-native-tls = { version = "0.5.0", optional = true }
-async-rustls = { version = "0.3.0", optional = true }
+async-rustls = { version = "0.4.0", optional = true }
 async-std-crate = { package = "async-std", version = "1.7.0", optional = true }
-async-trait = "0.1.2"
-async_executors = { version = "0.6.0", default_features = false }
+async-trait = "0.1.54"
+async_executors = { version = "0.6.0", default-features = false }
 educe = "0.4.6"
 futures = "0.3.14"
 native-tls-crate = { package = "native-tls", version = "0.2", optional = true }
 pin-project = "1"
-rustls-crate = { package = "rustls", version = "0.20.7", optional = true, features = [
-    "dangerous_configuration",
-] }
+rustls-crate = { package = "rustls", version = "0.21.1", optional = true, features = ["dangerous_configuration"] }
 thiserror = "1"
 tokio-crate = { package = "tokio", version = "1.7", optional = true, features = [
     "rt",

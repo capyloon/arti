@@ -343,7 +343,7 @@ impl<C: AbstractChannelFactory> MgrState<C> {
             .inner
             .lock()
             .map_err(|_| internal!("poisoned channel manager"))?;
-        let mut inner = &mut *inner;
+        let inner = &mut *inner;
 
         if let Some(new_config) = new_config {
             inner.config = new_config.clone();
@@ -554,7 +554,7 @@ mod test {
     }
 
     #[derive(Clone, Debug, Default)]
-    struct FakeChannelFactory;
+    struct FakeChannelFactory {}
     #[async_trait]
     impl AbstractChannelFactory for FakeChannelFactory {
         type Channel = FakeChannel;

@@ -7,7 +7,7 @@ use crate::batching_split_before::IteratorExt as _;
 use crate::parse::tokenize::{ItemResult, NetDocReader};
 use crate::parse::{keyword::Keyword, parser::SectionRules};
 use crate::types::misc::{UnvalidatedEdCert, B64};
-use crate::{ParseErrorKind as EK, Result};
+use crate::{NetdocErrorKind as EK, Result};
 
 use itertools::Itertools as _;
 use once_cell::sync::Lazy;
@@ -16,16 +16,18 @@ use tor_checkable::signed::SignatureGated;
 use tor_checkable::timed::TimerangeBound;
 use tor_checkable::Timebound;
 use tor_hscrypto::pk::{HsIntroPtSessionIdKey, HsSvcNtorKey};
+use tor_hscrypto::NUM_INTRO_POINT_MAX;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 use tor_llcrypto::pk::{curve25519, ed25519, ValidatableSignature};
 
 /// The contents of the inner document of an onion service descriptor.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "hsdesc-inner-docs", visibility::make(pub))]
-pub(super) struct HsDescInner {
+pub(crate) struct HsDescInner {
     /// The authentication types that this onion service accepts when
     /// connecting.
-    // TODO HS: This should probably be a bitfield or enum-set of something.
+    //
+    // TODO: This should probably be a bitfield or enum-set of something.
     // Once we know whether the "password" authentication type really exists,
     // let's change to a better representation here.
     pub(super) intro_auth_types: Option<SmallVec<[IntroAuthType; 2]>>,
@@ -35,6 +37,8 @@ pub(super) struct HsDescInner {
     /// itself.)
     pub(super) single_onion_service: bool,
     /// A list of advertised introduction points and their contact info.
+    //
+    // Always has >= 1 and <= NUM_INTRO_POINT_MAX entries
     pub(super) intro_points: Vec<IntroPointDesc>,
 }
 
@@ -83,10 +87,13 @@ static HS_INNER_INTRO_RULES: Lazy<SectionRules<HsInnerKwd>> = Lazy::new(|| {
     rules.add(ENC_KEY.rule().required().may_repeat().args(2..));
     rules.add(ENC_KEY_CERT.rule().required().obj_required());
     rules.add(UNRECOGNIZED.rule().may_repeat().obj_optional());
-    // TODO HS We never look at the LEGACY_KEY* fields.  But might this not open
-    // us to distinguishability attacks with C tor?  (OTOH, in theory we do not
-    // defend against those.  In fact, there's an easier distinguisher, since we
-    // enforce UTF-8 in these documents, and C tor does not.)
+
+    // NOTE: We never look at the LEGACY_KEY* fields.  This does provide a
+    // distinguisher for Arti implementations and C tor implementations, but
+    // that's outside of Arti's threat model.
+    //
+    // (In fact, there's an easier distinguisher, since we enforce UTF-8 in
+    // these documents, and C tor does not.)
 
     rules.build()
 });
@@ -133,7 +140,7 @@ fn handle_inner_certificate(
 
     // These certs have to include a signing key.
     let cert = cert
-        .check_key(None) // TODO arti#759
+        .should_have_signing_key()
         .map_err(|e| make_err(e, "Certificate was not self-signed"))?;
 
     // Peel off the signature.
@@ -373,12 +380,33 @@ impl HsDescInner {
                 }
             };
 
-            intro_points.push(IntroPointDesc {
-                link_specifiers,
-                ipt_ntor_key: ntor_onion_key,
-                ipt_sid_key: auth_key,
-                svc_ntor_key,
-            });
+            // TODO SPEC: State who enforces NUM_INTRO_POINT_MAX and how (hsdirs, clients?)
+            //
+            // Simply discard extraneous IPTs.  The MAX value is hardcoded now, but a future
+            // protocol evolution might increase it and we should probably still work then.
+            //
+            // If the spec intended that hsdirs ought to validate this and reject descriptors
+            // with more than MAX (when they can), then this code is wrong because it would
+            // prevent any caller (eg future hsdir code in arti relay) from seeing the violation.
+            if intro_points.len() < NUM_INTRO_POINT_MAX {
+                intro_points.push(IntroPointDesc {
+                    link_specifiers,
+                    ipt_ntor_key: ntor_onion_key,
+                    ipt_sid_key: auth_key,
+                    svc_ntor_key,
+                });
+            }
+        }
+
+        // TODO SPEC: Might a HS publish descriptor with no IPTs to declare itself down?
+        // If it might, then we should:
+        //   - accept such descriptors here
+        //   - check for this situation explicitly in tor-hsclient connect.rs intro_rend_connect
+        //   - bail with a new `ConnError` (with ErrorKind OnionServiceNotRunning)
+        // with the consequence that once we obtain such a descriptor,
+        // we'll be satisfied with it and consider the HS down until the descriptor expires.
+        if intro_points.is_empty() {
+            return Err(EK::MissingEntry.with_msg("no introduction points"));
         }
 
         let inner = HsDescInner {
@@ -409,14 +437,55 @@ mod test {
     #![allow(clippy::unchecked_duration_subtraction)]
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
 
+    use std::iter;
+
+    use hex_literal::hex;
+    use itertools::chain;
     use tor_checkable::{SelfSigned, Timebound};
 
     use super::*;
     use crate::doc::hsdesc::{
         middle::HsDescMiddle,
         outer::HsDescOuter,
-        test::{TEST_DATA, TEST_SUBCREDENTIAL},
+        test_data::{TEST_DATA, TEST_SUBCREDENTIAL},
     };
+
+    // This is the inner document from hsdesc1.txt aka TEST_DATA
+    const TEST_DATA_INNER: &str = include_str!("../../../testdata/hsdesc-inner.txt");
+
+    #[test]
+    fn inner_text() {
+        use crate::NetdocErrorKind as NEK;
+        let _desc = HsDescInner::parse(TEST_DATA_INNER).unwrap();
+
+        let none = format!(
+            "{}\n",
+            TEST_DATA_INNER
+                .split_once("\nintroduction-point")
+                .unwrap()
+                .0,
+        );
+        let err = HsDescInner::parse(&none).map(|_| &none).unwrap_err();
+        assert_eq!(err.kind, NEK::MissingEntry);
+
+        let ipt = format!(
+            "introduction-point{}",
+            TEST_DATA_INNER
+                .rsplit_once("\nintroduction-point")
+                .unwrap()
+                .1,
+        );
+        for n in NUM_INTRO_POINT_MAX..NUM_INTRO_POINT_MAX + 2 {
+            let many = chain!(iter::once(&*none), iter::repeat(&*ipt).take(n),).collect::<String>();
+            let desc = HsDescInner::parse(&many).unwrap();
+            let desc = desc
+                .1
+                .dangerously_into_parts()
+                .0
+                .dangerously_assume_wellsigned();
+            assert_eq!(desc.intro_points.len(), NUM_INTRO_POINT_MAX);
+        }
+    }
 
     #[test]
     fn parse_good() -> Result<()> {
@@ -432,10 +501,26 @@ mod test {
             .decrypt_inner(&desc.blinded_id(), desc.revision_counter(), &subcred, None)
             .unwrap();
         let inner_body = std::str::from_utf8(&inner_body).unwrap();
-        let inner = HsDescInner::parse(inner_body)?;
+        let (ed_id, inner) = HsDescInner::parse(inner_body)?;
+        let inner = inner
+            .check_valid_at(&humantime::parse_rfc3339("2023-01-23T15:00:00Z").unwrap())
+            .unwrap()
+            .check_signature()
+            .unwrap();
 
-        // TODO hs: validate the expected contents of this part of the
-        // descriptor.
+        assert_eq!(ed_id.as_ref(), Some(desc.desc_sign_key_id()));
+
+        assert!(inner.intro_auth_types.is_none());
+        assert_eq!(inner.single_onion_service, false);
+        assert_eq!(inner.intro_points.len(), 3);
+
+        let ipt0 = &inner.intro_points[0];
+        assert_eq!(
+            ipt0.ipt_ntor_key().as_bytes(),
+            &hex!("553BF9F9E1979D6F5D5D7D20BB3FE7272E32E22B6E86E35C76A7CA8A377E402F")
+        );
+
+        assert_ne!(ipt0.link_specifiers, inner.intro_points[1].link_specifiers);
 
         Ok(())
     }

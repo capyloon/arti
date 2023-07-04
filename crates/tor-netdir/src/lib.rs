@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -51,6 +53,8 @@ pub mod testnet;
 #[cfg(feature = "testing")]
 pub mod testprovider;
 
+#[cfg(feature = "hs-service")]
+use itertools::chain;
 use static_assertions::const_assert;
 use tor_linkspec::{
     ChanTarget, DirectChanMethodsHelper, HasAddrs, HasRelayIds, RelayIdRef, RelayIdType,
@@ -61,11 +65,12 @@ use tor_netdoc::doc::microdesc::{MdDigest, Microdesc};
 use tor_netdoc::doc::netstatus::{self, MdConsensus, MdConsensusRouterStatus, RouterStatus};
 use tor_netdoc::types::policy::PortPolicy;
 #[cfg(feature = "hs-common")]
-use {hsdir_params::HsDirParams, hsdir_ring::HsDirRing, itertools::chain, std::iter};
+use {hsdir_params::HsDirParams, hsdir_ring::HsDirRing, std::iter};
 
 use derive_more::{From, Into};
 use futures::stream::BoxStream;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use rand::seq::SliceRandom;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -76,7 +81,10 @@ use tracing::warn;
 use typed_index_collections::{TiSlice, TiVec};
 
 #[cfg(feature = "hs-common")]
-use tor_hscrypto::{pk::HsBlindId, time::TimePeriod};
+use {
+    itertools::Itertools,
+    tor_hscrypto::{pk::HsBlindId, time::TimePeriod},
+};
 
 pub use err::Error;
 pub use weight::WeightRole;
@@ -252,11 +260,12 @@ impl From<u64> for RelayWeight {
     }
 }
 
-/// An operation for which we might be requesting an onion service directory.
-#[derive(Copy, Clone, Debug)]
+/// An operation for which we might be requesting a hidden service directory.
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum OnionServiceDirOp {
+pub enum HsDirOp {
     /// Uploading an onion service descriptor.
+    #[cfg(feature = "hs-service")]
     Upload,
     /// Downloading an onion service descriptor.
     Download,
@@ -272,6 +281,14 @@ pub enum OnionServiceDirOp {
 /// document, and then adding enough microdescriptors to that `PartialNetDir` so
 /// that it can be used to build paths. (Thus, if you have a NetDir, it is
 /// definitely adequate to build paths.)
+///
+/// # "Usable" relays
+///
+/// Many methods on NetDir are defined in terms of <a name="usable">"Usable"</a> relays.  Unless
+/// otherwise stated, a relay is "usable" if it is listed in the consensus,
+/// if we have full directory information for that relay (including a
+/// microdescriptor), and if that relay does not have any flags indicating that
+/// we should never use it. (Currently, `NoEdConsensus` is the only such flag.)
 ///
 /// # Limitations
 ///
@@ -325,7 +342,7 @@ pub struct NetDir {
     // Ideally, a PartialNetDir would contain only an HsDirs<HsDirParams>,
     // or perhaps nothing at all, here.
     #[cfg(feature = "hs-common")]
-    hsdir_rings: HsDirs<HsDirRing>,
+    hsdir_rings: Arc<HsDirs<HsDirRing>>,
 
     /// Weight values to apply to a given relay when deciding how frequently
     /// to choose it for a given role.
@@ -365,14 +382,14 @@ pub(crate) struct HsDirs<D> {
     /// secondary rings will be active at a time.  We have two here in order
     /// to conform with a more flexible regime in proposal 342.
     //
-    // TODO hs: hs clients never need this; so I've made it not-present for thm.
+    // TODO hss: hs clients never need this; so I've made it not-present for thm.
     // But does that risk too much with respect to side channels?
     //
-    // TODO hs: Perhaps we should refactor this so that it is clear that these
+    // TODO hss: Perhaps we should refactor this so that it is clear that these
     // are immutable?  On the other hand, the documentation for this type
     // declares that it is immutable, so we are likely okay.
     //
-    // TODO hs: this `Vec` is only ever 0,1,2 elements.
+    // TODO hss: this `Vec` is only ever 0,1,2 elements.
     // Maybe it should be an ArrayVec or something.
     #[cfg(feature = "hs-service")]
     secondary: Vec<D>,
@@ -389,18 +406,35 @@ impl<D> HsDirs<D> {
         }
     }
 
-    /// Iterate over the contained hsdirs
+    /// Iterate over some of the contained hsdirs, according to `secondary`
+    ///
+    /// The current ring is always included.
+    /// Secondary rings are included iff `secondary` and the `hs-service` feature is enabled.
+    fn iter_filter_secondary(&self, secondary: bool) -> impl Iterator<Item = &D> {
+        let i = iter::once(&self.current);
+
+        // With "hs-service" disabled, there are no secondary rings,
+        // so we don't care.
+        let _ = secondary;
+
+        #[cfg(feature = "hs-service")]
+        let i = chain!(i, self.secondary.iter().filter(move |_| secondary));
+
+        i
+    }
+
+    /// Iterate over all the contained hsdirs
     pub(crate) fn iter(&self) -> impl Iterator<Item = &D> {
-        chain!(iter::once(&self.current), {
-            // This is necessary because chain!'s expansion happens *before*
-            // the #[cfg] is applied, so we can't have an argument to chain!
-            // which is conditionally present.
-            #[allow(unused_variables)]
-            let i = iter::empty::<&D>();
+        self.iter_filter_secondary(true)
+    }
+
+    /// Iterate over the hsdirs relevant for `op`
+    pub(crate) fn iter_for_op(&self, op: HsDirOp) -> impl Iterator<Item = &D> {
+        self.iter_filter_secondary(match op {
             #[cfg(feature = "hs-service")]
-            let i = self.secondary.iter();
-            i
-        },)
+            HsDirOp::Upload => true,
+            HsDirOp::Download => false,
+        })
     }
 }
 
@@ -459,6 +493,13 @@ pub enum Timeliness {
 
 /// An object that can provide [`NetDir`]s, as well as inform consumers when
 /// they might have changed.
+///
+/// It is the responsibility of the implementor of `NetDirProvider`
+/// to try to obtain an up-to-date `NetDir`,
+/// and continuously to maintain and update it.
+///
+/// In usual configurations, Arti uses `tor_dirmgr::DirMgr`
+/// as its `NetDirProvider`.
 pub trait NetDirProvider: UpcastArcNetDirProvider + Send + Sync {
     /// Return a network directory that's live according to the provided
     /// `timeliness`.
@@ -632,14 +673,16 @@ impl PartialNetDir {
             .collect();
 
         #[cfg(feature = "hs-common")]
-        let hsdir_rings = {
+        let hsdir_rings = Arc::new({
             let params = HsDirParams::compute(&consensus, &params).expect("Invalid consensus!");
-            // TODO HS: I dislike using expect above, but this function does not
-            // return a Result. Perhaps we should change it so that it can?  Or as an alternative
-            // we could let this object exist in a state without any HsDir rings.
+            // TODO: It's a bit ugly to use expect above, but this function does
+            // not return a Result. On the other hand, the error conditions under which
+            // HsDirParams::compute can return Err are _very_ narrow and hard to
+            // hit; see documentation in that function.  As such, we probably
+            // don't need to have this return a Result.
 
             params.map(HsDirRing::empty_from_params)
-        };
+        });
 
         let netdir = NetDir {
             consensus: Arc::new(consensus),
@@ -689,10 +732,12 @@ impl PartialNetDir {
     fn compute_rings(&mut self) {
         let params = HsDirParams::compute(&self.netdir.consensus, &self.netdir.params)
             .expect("Invalid consensus");
-        // TODO hs: see TODO by similar expect in new()
+        // TODO: see TODO by similar expect in new()
 
-        self.netdir.hsdir_rings = params
-            .map(|params| HsDirRing::compute(params, &self.netdir, self.prev_netdir.as_deref()));
+        self.netdir.hsdir_rings =
+            Arc::new(params.map(|params| {
+                HsDirRing::compute(params, &self.netdir, self.prev_netdir.as_deref())
+            }));
     }
 
     /// Return true if this are enough information in this directory
@@ -802,7 +847,7 @@ impl NetDir {
             .iter_enumerated()
             .map(move |(rsidx, rs)| self.relay_from_rs_and_rsidx(rs, rsidx))
     }
-    /// Return an iterator over all usable Relays.
+    /// Return an iterator over all [usable](NetDir#usable) Relays.
     pub fn relays(&self) -> impl Iterator<Item = Relay<'_>> {
         self.all_relays().filter_map(UncheckedRelay::into_relay)
     }
@@ -816,9 +861,9 @@ impl NetDir {
     /// Return a relay matching a given identity, if we have a
     /// _usable_ relay with that key.
     ///
-    /// (Does not return unusable relays.)
+    /// (Does not return [unusable](NetDir#usable) relays.)
     ///
-    ///    
+    ///
     /// Note that a `None` answer is not always permanent: if a microdescriptor
     /// is subsequently added for a relay with this ID, the ID may become usable
     /// even if it was not usable before.
@@ -844,10 +889,27 @@ impl NetDir {
         Some(answer)
     }
 
+    /// Obtain a `Relay` given a `RouterStatusIdx`
+    ///
+    /// Differs from `relay_from_rs_and_rsi` as follows:
+    ///  * That function expects the caller to already have an `MdConsensusRouterStatus`;
+    ///    it checks with `debug_assert` that the relay in the netdir matches.
+    ///  * That function panics if the `RouterStatusIdx` is invalid; this one returns `None`.
+    ///  * That function returns an `UncheckedRelay`; this one a `Relay`.
+    ///
+    /// `None` could be returned here, even with a valid `rsi`,
+    /// if `rsi` refers to an [unusable](NetDir#usable) relay.
+    #[cfg_attr(not(feature = "hs-common"), allow(dead_code))]
+    pub(crate) fn relay_by_rs_idx(&self, rs_idx: RouterStatusIdx) -> Option<Relay<'_>> {
+        let rs = self.c_relays().get(rs_idx)?;
+        let md = self.mds.get(rs_idx)?.as_deref();
+        UncheckedRelay { rs, md }.into_relay()
+    }
+
     /// Return a relay with the same identities as those in `target`, if one
     /// exists.
     ///
-    /// Does not return unusable relays.
+    /// Does not return [unusable](NetDir#usable) relays.
     ///
     /// # Limitations
     ///
@@ -868,6 +930,73 @@ impl NetDir {
             Some(candidate)
         } else {
             None
+        }
+    }
+
+    /// Check whether there is a relay that has at least one identity from
+    /// `target`, and which _could_ have every identity from `target`.
+    /// If so, return such a relay.
+    ///
+    /// Return `Ok(None)` if we did not find a relay with any identity from `target`.
+    ///
+    /// Return `RelayLookupError::Impossible` if we found a relay with at least
+    /// one identity from `target`, but that relay's other identities contradict
+    /// what we learned from `target`.
+    ///
+    /// Does not return [unusable](NetDir#usable) relays.
+    ///
+    /// (This function is only useful if you need to distinguish the
+    /// "impossible" case from the "no such relay known" case.)
+    ///
+    /// # Limitations
+    ///
+    /// This will be very slow if `target` does not have an Ed25519 or RSA
+    /// identity.
+    //
+    // TODO HS: This function could use a better name.
+    //
+    // TODO: We could remove the feature restriction here once we think this API is
+    // stable.
+    #[cfg(feature = "hs-common")]
+    pub fn by_ids_detailed<T>(
+        &self,
+        target: &T,
+    ) -> std::result::Result<Option<Relay<'_>>, RelayLookupError>
+    where
+        T: HasRelayIds + ?Sized,
+    {
+        let candidate = target
+            .identities()
+            // Find all the relays that share any identity with this set of identities.
+            .filter_map(|id| self.by_id(id))
+            // We might find the same relay more than once under a different
+            // identity, so we remove the duplicates.
+            //
+            // Since there is at most one relay per rsa identity per consensus,
+            // this is a true uniqueness check under current construction rules.
+            .unique_by(|r| r.rs.rsa_identity())
+            // If we find two or more distinct relays, then have a contradiction.
+            .at_most_one()
+            .map_err(|_| RelayLookupError::Impossible)?;
+
+        // If we have no candidate, return None early.
+        let candidate = match candidate {
+            Some(relay) => relay,
+            None => return Ok(None),
+        };
+
+        // Now we know we have a single candidate.  Make sure that it does not have any
+        // identity that does not match the target.
+        if target
+            .identities()
+            .all(|wanted_id| match candidate.identity(wanted_id.id_type()) {
+                None => true,
+                Some(id) => id == wanted_id,
+            })
+        {
+            Ok(Some(candidate))
+        } else {
+            Err(RelayLookupError::Impossible)
         }
     }
 
@@ -929,8 +1058,14 @@ impl NetDir {
         }
     }
 
-    /// Return a (possibly unusable) relay with a given RSA identity.
+    /// Return a (possibly [unusable](NetDir#usable)) relay with a given RSA identity.
+    ///
+    /// This API can be used to find information about a relay that is listed in
+    /// the current consensus, even if we don't yet have enough information
+    /// (like a microdescriptor) about the relay to use it.
     #[allow(clippy::missing_panics_doc)] // Can't panic on valid object.
+    #[cfg_attr(feature = "experimental-api", visibility::make(pub))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "experimental-api")))]
     fn by_rsa_id_unchecked(&self, rsa_id: &RsaIdentity) -> Option<UncheckedRelay<'_>> {
         let rsidx = *self.rsidx_by_rsa.get(rsa_id)?;
         let rs = self.c_relays().get(rsidx).expect("Corrupt index");
@@ -938,12 +1073,17 @@ impl NetDir {
         Some(self.relay_from_rs_and_rsidx(rs, rsidx))
     }
     /// Return the relay with a given RSA identity, if we have one
-    /// and it is usable.
+    /// and it is [usable](NetDir#usable).
     fn by_rsa_id(&self, rsa_id: &RsaIdentity) -> Option<Relay<'_>> {
         self.by_rsa_id_unchecked(rsa_id)?.into_relay()
     }
-    /// Return true if `rsa_id` is listed in this directory, even if it
-    /// isn't currently usable.
+    /// Return true if `rsa_id` is listed in this directory, even if it isn't
+    /// currently usable.
+    ///
+    /// (An "[unusable](NetDir#usable)" relay in this context is one for which we don't have full
+    /// directory information.)
+    #[cfg_attr(feature = "experimental-api", visibility::make(pub))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "experimental-api")))]
     fn rsa_id_is_listed(&self, rsa_id: &RsaIdentity) -> bool {
         self.by_rsa_id_unchecked(rsa_id).is_some()
     }
@@ -955,7 +1095,7 @@ impl NetDir {
     fn all_hsdirs(&self) -> impl Iterator<Item = (RouterStatusIdx, Relay<'_>)> {
         self.c_relays().iter_enumerated().filter_map(|(rsidx, rs)| {
             let relay = self.relay_from_rs_and_rsidx(rs, rsidx);
-            relay.is_hsdir_for_ring().then(|| ())?;
+            relay.is_hsdir_for_ring().then_some(())?;
             let relay = relay.into_relay()?;
             Some((rsidx, relay))
         })
@@ -969,6 +1109,25 @@ impl NetDir {
     pub fn params(&self) -> &NetParameters {
         &self.params
     }
+
+    /// Return a [`ProtoStatus`](netstatus::ProtoStatus) that lists the
+    /// network's current requirements and recommendations for the list of
+    /// protocols that every relay must implement.
+    //
+    // TODO HS: I am not sure this is the right API; other alternatives would be:
+    //    * To expose the _required_ relay protocol list instead (since that's all that
+    //      onion service implementations need).
+    //    * To expose the client protocol list as well (for symmetry).
+    //    * To expose the MdConsensus instead (since that's more general, although
+    //      it restricts the future evolution of this API).
+    //
+    // I think that this is a reasonably good compromise for now, but I'm going
+    // to put it behind the `hs-common` feature to give us time to consider more.
+    #[cfg(feature = "hs-common")]
+    pub fn relay_protocol_status(&self) -> &netstatus::ProtoStatus {
+        self.consensus.relay_protocol_status()
+    }
+
     /// Return weighted the fraction of relays we can use.  We only
     /// consider relays that match the predicate `usable`.  We weight
     /// this bandwidth according to the provided `role`.
@@ -1066,7 +1225,6 @@ impl NetDir {
         R: rand::Rng,
         P: FnMut(&Relay<'a>) -> bool,
     {
-        use rand::seq::SliceRandom;
         let relays: Vec<_> = self.relays().filter(usable).collect();
         // This algorithm uses rand::distributions::WeightedIndex, and uses
         // gives O(n) time and space  to build the index, plus O(log n)
@@ -1119,7 +1277,6 @@ impl NetDir {
         R: rand::Rng,
         P: FnMut(&Relay<'a>) -> bool,
     {
-        use rand::seq::SliceRandom;
         let relays: Vec<_> = self.relays().filter(usable).collect();
         // NOTE: See discussion in pick_relay().
         let mut relays = match relays[..].choose_multiple_weighted(rng, n, |r| {
@@ -1165,7 +1322,7 @@ impl NetDir {
     /// selected for a given `role`.
     ///
     /// Note that weight returned by this function assumes that the
-    /// relay with that ID is actually usable; if it isn't usable,
+    /// relay with that ID is actually [usable](NetDir#usable); if it isn't usable,
     /// then other weight-related functions will call its weight zero.
     pub fn weight_by_rsa_id(&self, rsa_id: &RsaIdentity, role: WeightRole) -> Option<RelayWeight> {
         self.by_rsa_id_unchecked(rsa_id)
@@ -1197,42 +1354,48 @@ impl NetDir {
         })
     }
 
-    /// Return the current onion service directory "time period".
+    /// Return the current hidden service directory "time period".
     ///
     /// Specifically, this returns the time period that contains the beginning
     /// of the validity period of this `NetDir`'s consensus.  That time period
-    /// is the one we use when acting as an onion service client.
+    /// is the one we use when acting as an hidden service client.
     #[cfg(feature = "hs-common")]
-    pub fn onion_service_time_period(&self) -> TimePeriod {
+    pub fn hs_time_period(&self) -> TimePeriod {
         self.hsdir_rings.current.time_period()
     }
 
-    /// Return the secondary onion service directory "time periods".
+    /// Return all the relevant the hidden service directory "time periods"
     ///
-    /// These are additional time periods that we publish descriptors for when we are
-    /// acting as an onion service.
+    /// This includes the current time period (as from
+    /// [`.hs_time_period`](NetDir::hs_time_period))
+    /// plus additional time periods that we publish descriptors for when we are
+    /// acting as a hidden service.
+    //
+    // TODO HSS do we need this function?
     #[cfg(feature = "hs-service")]
-    pub fn onion_service_secondary_time_periods(&self) -> Vec<TimePeriod> {
+    pub fn hs_all_time_periods(&self) -> Vec<TimePeriod> {
         self.hsdir_rings
-            .secondary
             .iter()
             .map(HsDirRing::time_period)
             .collect()
     }
 
-    /// Return the relays in this network directory that will be used to store a
+    /// Return the relays in this network directory that will be used as hidden service directories
+    ///
+    /// Depending on `op`,
+    /// these are suitable to either store, or retrieve, a
     /// given onion service's descriptor at a given time period.
+    ///
+    /// When `op` is `Download`, the order is random.
+    /// When `op` is `Upload`, the order is not specified.
     ///
     /// Return an error if the time period is not one returned by
     /// `onion_service_time_period` or `onion_service_secondary_time_periods`.
     #[cfg(feature = "hs-common")]
-    #[allow(unused, clippy::missing_panics_doc)] // TODO hs: remove.
-    pub fn onion_service_dirs(
-        &self,
-        id: HsBlindId,
-        op: OnionServiceDirOp,
-        when: TimePeriod,
-    ) -> std::result::Result<Vec<Relay<'_>>, OnionDirLookupError> {
+    pub fn hs_dirs<'r, R>(&'r self, hsid: &HsBlindId, op: HsDirOp, rng: &mut R) -> Vec<Relay<'r>>
+    where
+        R: rand::Rng,
+    {
         // Algorithm:
         //
         // 1. Determine which HsDirRing to use, based on the time period.
@@ -1241,7 +1404,7 @@ impl NetDir {
         //    `hsdir_spread_fetch` based on `op`.
         // 4. Let n_replicas = the parameter `hsdir_n_replicas`.
         // 5. Initialize Dirs = []
-        // 6. for idx in 0..n_replicas:
+        // 6. for idx in 1..=n_replicas:
         //       - let H = hsdir_ring::onion_service_index(id, replica, rand,
         //         period).
         //       - Find the position of H within hsdir_ring.
@@ -1249,8 +1412,63 @@ impl NetDir {
         //         adding them to Dirs until we have added `spread` new elements
         //         that were not there before.
         // 7. return Dirs.
+        let n_replicas = self
+            .params
+            .hsdir_n_replicas
+            .get()
+            .try_into()
+            .expect("BoundedInt did not enforce bounds");
+        let spread_fetch = self
+            .params
+            .hsdir_spread_fetch
+            .get()
+            .try_into()
+            .expect("BoundedInt did not enforce bounds!");
 
-        todo!() // TODO hs
+        // TODO HSS We don't implement this bit of the spec (2.2.3 penultimate para):
+        //
+        //                                                        ... If any of those
+        //       nodes have already been selected for a lower-numbered replica of the
+        //       service, any nodes already chosen are disregarded (i.e. skipped over)
+        //       when choosing a replica's hsdir_spread_store nodes.
+        //
+        // This doesn't yet affect compatibility for clients, but when we
+        // implement onion services, it will create compatibility issues.  We
+        // need to fix it.
+        //
+        // TODO HSS: I may be wrong here but I suspect that this function may
+        // need refactoring so that it does not look at _all_ of the HsDirRings,
+        // but only at the ones that corresponds to time periods for which
+        // HsBlindId is valid.  Or I could be mistaken, in which case we should
+        // have a comment to explain why I am, since the logic is subtle.
+        // (For clients, there is only one ring.) -nickm
+
+        let mut hs_dirs = self
+            .hsdir_rings
+            .iter_for_op(op)
+            .cartesian_product(1..=n_replicas) // 1-indexed !
+            .flat_map(move |(ring, replica): (&HsDirRing, u8)| {
+                let hsdir_idx = hsdir_ring::service_hsdir_index(hsid, replica, ring.params());
+                ring.ring_items_at(hsdir_idx, spread_fetch)
+            })
+            .filter_map(|(_hsdir_idx, rs_idx)| {
+                // This ought not to be None but let's not panic or bail if it is
+                self.relay_by_rs_idx(*rs_idx)
+            })
+            .collect_vec();
+
+        match op {
+            HsDirOp::Download => {
+                // When `op` is `Download`, the order is random.
+                hs_dirs.shuffle(rng);
+            }
+            #[cfg(feature = "hs-service")]
+            HsDirOp::Upload => {
+                // When `op` is `Upload`, the order is not specified.
+            }
+        }
+
+        hs_dirs
     }
 }
 
@@ -1267,7 +1485,7 @@ impl MdReceiver for NetDir {
 }
 
 impl<'a> UncheckedRelay<'a> {
-    /// Return true if this relay is valid and usable.
+    /// Return true if this relay is valid and [usable](NetDir#usable).
     ///
     /// This function should return `true` for every Relay we expose
     /// to the user.
@@ -1275,7 +1493,7 @@ impl<'a> UncheckedRelay<'a> {
         // No need to check for 'valid' or 'running': they are implicit.
         self.md.is_some() && self.rs.ed25519_id_is_usable()
     }
-    /// If this is usable, return a corresponding Relay object.
+    /// If this is [usable](NetDir#usable), return a corresponding Relay object.
     pub fn into_relay(self) -> Option<Relay<'a>> {
         if self.is_usable() {
             Some(Relay {
@@ -1336,7 +1554,7 @@ impl<'a> Relay<'a> {
     pub fn is_dir_cache(&self) -> bool {
         rs_is_dir_cache(self.rs)
     }
-    /// Return true if this relay is marked as usable as a new Guard node.
+    /// Return true if this relay is marked as a potential Guard node.
     pub fn is_flagged_guard(&self) -> bool {
         self.rs.is_flagged_guard()
     }
@@ -1428,6 +1646,17 @@ impl<'a> Relay<'a> {
     pub fn md(&self) -> &Microdesc {
         self.md
     }
+}
+
+/// An error value returned from [`NetDir::by_ids_detailed`].
+#[cfg(feature = "hs-common")]
+#[derive(Clone, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RelayLookupError {
+    /// We found a relay whose presence indicates that the provided set of
+    /// identities is impossible to resolve.
+    #[error("Provided set of identities is impossible according to consensus.")]
+    Impossible,
 }
 
 impl<'a> HasAddrs for Relay<'a> {
@@ -1758,13 +1987,16 @@ mod test {
 
     #[test]
     fn relay_funcs() {
-        let (consensus, microdescs) = construct_custom_network(|pos, nb| {
-            if pos == 15 {
-                nb.rs.add_or_port("[f0f0::30]:9001".parse().unwrap());
-            } else if pos == 20 {
-                nb.rs.add_or_port("[f0f0::3131]:9001".parse().unwrap());
-            }
-        })
+        let (consensus, microdescs) = construct_custom_network(
+            |pos, nb| {
+                if pos == 15 {
+                    nb.rs.add_or_port("[f0f0::30]:9001".parse().unwrap());
+                } else if pos == 20 {
+                    nb.rs.add_or_port("[f0f0::3131]:9001".parse().unwrap());
+                }
+            },
+            None,
+        )
         .unwrap();
         let subnet_config = SubnetConfig::default();
         let mut dir = PartialNetDir::new(consensus, None);
@@ -1903,7 +2135,7 @@ mod test {
     #[test]
     fn test_by_id() {
         // Make a netdir that omits the microdescriptor for 0xDDDDDD...
-        let netdir = construct_custom_netdir(|pos, mut nb| {
+        let netdir = construct_custom_netdir(|pos, nb| {
             nb.omit_md = pos == 13;
         })
         .unwrap();
@@ -1967,6 +2199,66 @@ mod test {
             netdir.id_pair_listed(&[15; 32].into(), &[99; 20].into()),
             Some(false)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "hs-common")]
+    fn test_by_ids_detailed() {
+        // Make a netdir that omits the microdescriptor for 0xDDDDDD...
+        let netdir = construct_custom_netdir(|pos, nb| {
+            nb.omit_md = pos == 13;
+        })
+        .unwrap();
+
+        let netdir = netdir.unwrap_if_sufficient().unwrap();
+
+        let id13_13 = RelayIds::builder()
+            .ed_identity([13; 32].into())
+            .rsa_identity([13; 20].into())
+            .build()
+            .unwrap();
+        let id15_15 = RelayIds::builder()
+            .ed_identity([15; 32].into())
+            .rsa_identity([15; 20].into())
+            .build()
+            .unwrap();
+        let id15_99 = RelayIds::builder()
+            .ed_identity([15; 32].into())
+            .rsa_identity([99; 20].into())
+            .build()
+            .unwrap();
+        let id99_15 = RelayIds::builder()
+            .ed_identity([99; 32].into())
+            .rsa_identity([15; 20].into())
+            .build()
+            .unwrap();
+        let id99_99 = RelayIds::builder()
+            .ed_identity([99; 32].into())
+            .rsa_identity([99; 20].into())
+            .build()
+            .unwrap();
+        let id15_xx = RelayIds::builder()
+            .ed_identity([15; 32].into())
+            .build()
+            .unwrap();
+        let idxx_15 = RelayIds::builder()
+            .rsa_identity([15; 20].into())
+            .build()
+            .unwrap();
+
+        assert!(matches!(netdir.by_ids_detailed(&id13_13), Ok(None)));
+        assert!(matches!(netdir.by_ids_detailed(&id15_15), Ok(Some(_))));
+        assert!(matches!(
+            netdir.by_ids_detailed(&id15_99),
+            Err(RelayLookupError::Impossible)
+        ));
+        assert!(matches!(
+            netdir.by_ids_detailed(&id99_15),
+            Err(RelayLookupError::Impossible)
+        ));
+        assert!(matches!(netdir.by_ids_detailed(&id99_99), Ok(None)));
+        assert!(matches!(netdir.by_ids_detailed(&id15_xx), Ok(Some(_))));
+        assert!(matches!(netdir.by_ids_detailed(&idxx_15), Ok(Some(_))));
     }
 
     #[test]

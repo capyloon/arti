@@ -9,13 +9,14 @@ use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use tor_hscrypto::pk::{HsClientDescEncSecretKey, HsClientIntroAuthSecretKey};
+use tor_hscrypto::pk::{HsClientDescEncSecretKey, HsClientIntroAuthKeypair, HsId};
+use tor_keymgr::{ArtiPath, ArtiPathComponent, CTorPath, KeySpecifier};
 
 /// Keys (if any) to use when connecting to a specific onion service.
 ///
 /// Represents a possibly empty subset of the following keys:
 ///  * `KS_hsc_desc_enc`, [`HsClientDescEncSecretKey`]
-///  * `KS_hsc_intro_auth`, [`HsClientIntroAuthSecretKey`]
+///  * `KS_hsc_intro_auth`, [`HsClientIntroAuthKeypair`]
 ///
 /// `HsClientSecretKeys` is constructed with a `Builder`:
 /// use `ClientSecretKeysBuilder::default()`,
@@ -42,7 +43,7 @@ pub struct HsClientSecretKeys {
     ///
     /// This is compared and hashed by the Arc pointer value.
     /// We don't want to implement key comparison by comparing secret key values.
-    keys: Arc<ClientSecretKeyValues>,
+    pub(crate) keys: Arc<ClientSecretKeyValues>,
 }
 
 impl Debug for HsClientSecretKeys {
@@ -104,10 +105,10 @@ type ClientSecretKeyValues = HsClientSecretKeysBuilder;
 #[derive(Default, Debug)]
 pub struct HsClientSecretKeysBuilder {
     /// Possibly, a key that is used to decrypt a descriptor.
-    ks_hsc_desc_enc: Option<HsClientDescEncSecretKey>,
+    pub(crate) ks_hsc_desc_enc: Option<HsClientDescEncSecretKey>,
 
     /// Possibly, a key that is used to authenticate while introducing.
-    ks_hsc_intro_auth: Option<HsClientIntroAuthSecretKey>,
+    pub(crate) ks_hsc_intro_auth: Option<HsClientIntroAuthKeypair>,
 }
 
 // TODO derive these setters
@@ -122,15 +123,77 @@ impl HsClientSecretKeysBuilder {
         self
     }
     /// Provide an introduction authentication key
-    pub fn ks_hsc_intro_auth(&mut self, ks: HsClientIntroAuthSecretKey) -> &mut Self {
+    pub fn ks_hsc_intro_auth(&mut self, ks: HsClientIntroAuthKeypair) -> &mut Self {
         self.ks_hsc_intro_auth = Some(ks);
         self
     }
 
     /// Convert these
-    pub fn build(self) -> Result<HsClientSecretKeys, tor_config::ConfigError> {
+    pub fn build(self) -> Result<HsClientSecretKeys, tor_config::ConfigBuildError> {
         Ok(HsClientSecretKeys {
             keys: Arc::new(self),
         })
+    }
+}
+
+/// An HS client identifier.
+///
+/// Distinguishes different "clients" or "users" of this Arti instance,
+/// so that they can have different sets of HS client authentication keys.
+#[derive(Clone, Debug, derive_more::Display, derive_more::Into, derive_more::AsRef)]
+pub struct HsClientSpecifier(ArtiPathComponent);
+
+impl HsClientSpecifier {
+    /// Create a new [`HsClientSpecifier`].
+    ///
+    /// The `inner` string **must** be a valid [`ArtiPathComponent`].
+    pub fn new(inner: String) -> Result<Self, tor_keymgr::Error> {
+        ArtiPathComponent::new(inner).map(Self)
+    }
+}
+
+/// An identifier for a particular instance of an HS client key.
+pub struct HsClientSecretKeySpecifier {
+    /// The client associated with this key.
+    client_id: HsClientSpecifier,
+    /// The hidden service this authorization key is for.
+    hs_id: HsId,
+    /// The role of the key.
+    role: HsClientKeyRole,
+}
+
+/// The role of an HS client key.
+#[derive(Debug, Clone, Copy, PartialEq, derive_more::Display)]
+#[non_exhaustive]
+pub enum HsClientKeyRole {
+    /// A key for deriving keys for decrypting HS descriptors (KP_hsc_desc_enc).
+    #[display(fmt = "KP_hsc_desc_enc")]
+    DescEnc,
+    /// A key for computing INTRODUCE1 signatures (KP_hsc_intro_auth).
+    #[display(fmt = "KP_hsc_intro_auth")]
+    IntroAuth,
+}
+
+impl HsClientSecretKeySpecifier {
+    /// Create a new [`HsClientSecretKeySpecifier`].
+    pub fn new(client_id: HsClientSpecifier, hs_id: HsId, role: HsClientKeyRole) -> Self {
+        Self {
+            client_id,
+            hs_id,
+            role,
+        }
+    }
+}
+
+impl KeySpecifier for HsClientSecretKeySpecifier {
+    fn arti_path(&self) -> tor_keymgr::Result<ArtiPath> {
+        ArtiPath::new(format!(
+            "client/{}/{}/{}",
+            self.client_id, self.hs_id, self.role
+        ))
+    }
+
+    fn ctor_path(&self) -> Option<CTorPath> {
+        todo!()
     }
 }

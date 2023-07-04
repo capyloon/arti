@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -52,7 +54,7 @@ mod util;
 #[doc(hidden)]
 pub use util::batching_split_before;
 
-pub use err::{BuildError, Error, ParseErrorKind, Pos};
+pub use err::{BuildError, Error, NetdocErrorKind, Pos};
 
 #[cfg(feature = "hs-service")]
 #[cfg_attr(docsrs, doc(cfg(feature = "hs-service")))]

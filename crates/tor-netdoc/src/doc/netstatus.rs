@@ -55,7 +55,7 @@ use crate::parse::tokenize::{Item, ItemResult, NetDocReader};
 use crate::types::misc::*;
 use crate::util::private::Sealed;
 use crate::util::PeekableIterator;
-use crate::{Error, ParseErrorKind as EK, Pos, Result};
+use crate::{Error, NetdocErrorKind as EK, Pos, Result};
 use std::collections::{HashMap, HashSet};
 use std::{net, result, time};
 use tor_error::internal;
@@ -141,6 +141,18 @@ impl Lifetime {
     pub fn valid_at(&self, when: time::SystemTime) -> bool {
         self.valid_after <= when && when <= self.valid_until
     }
+
+    /// Return the voting period implied by this lifetime.
+    ///
+    /// (The "voting period" is the amount of time in between when a consensus first
+    /// becomes valid, and when the next consensus is expected to become valid)
+    pub fn voting_period(&self) -> time::Duration {
+        let valid_after = self.valid_after();
+        let fresh_until = self.fresh_until();
+        fresh_until
+            .duration_since(valid_after)
+            .expect("Mis-formed lifetime")
+    }
 }
 
 /// A set of named network parameters.
@@ -201,6 +213,8 @@ where
 }
 
 /// A list of subprotocol versions that implementors should/must provide.
+///
+/// Each consensus has two of these: one for relays, and one for clients.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ProtoStatus {
@@ -297,14 +311,12 @@ pub struct SignatureGroup {
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, derive_more::From, derive_more::Into, derive_more::AsRef,
 )]
-// TODO hs: Use CtBytes for this.  I don't think it actually matters, but it
-// seems like a good idea.
+// (This doesn't need to use CtByteArray; we don't really need to compare these.)
 pub struct SharedRandVal([u8; 32]);
 
 /// A shared-random value produced by the directory authorities,
 /// along with meta-information about that value.
 #[allow(dead_code)]
-// TODO hs: This should have real accessors, not this 'visible/visibility' hack.
 #[cfg_attr(
     feature = "dangerous-expose-struct-fields",
     visible::StructFields(pub),
@@ -443,7 +455,9 @@ bitflags! {
     /// If the document contained any flags that we _didn't_ recognize,
     /// they are not listed in this type.
     ///
-    /// The bit values used to represent the flags have no meaning.
+    /// The bit values used to represent the flags have no meaning;
+    /// they may change between releases of this crate.  Relying on their
+    /// values may void your semver guarantees.
     #[derive(Clone, Copy, Debug)]
     pub struct RelayFlags: u16 {
         /// Is this a directory authority?
@@ -465,27 +479,34 @@ bitflags! {
         /// Does this relay participate on the onion service directory
         /// ring?
         const HSDIR = (1<<5);
+        /// Set if this relay is considered "middle only", not suitable to run
+        /// as an exit or guard relay.
+        ///
+        /// Note that this flag is only used by authorities as part of
+        /// the voting process; clients do not and should not act
+        /// based on whether it is set.
+        const MIDDLE_ONLY = (1<<6);
         /// If set, there is no consensus for the ed25519 key for this relay.
-        const NO_ED_CONSENSUS = (1<<6);
+        const NO_ED_CONSENSUS = (1<<7);
         /// Is this relay considered "stable" enough for long-lived circuits?
-        const STABLE = (1<<7);
+        const STABLE = (1<<8);
         /// Set if the authorities are requesting a fresh descriptor for
         /// this relay.
-        const STALE_DESC = (1<<8);
+        const STALE_DESC = (1<<9);
         /// Set if this relay is currently running.
         ///
         /// This flag can appear in votes, but in consensuses, every relay
         /// is assumed to be running.
-        const RUNNING = (1<<9);
+        const RUNNING = (1<<10);
         /// Set if this relay is considered "valid" -- allowed to be on
         /// the network.
         ///
         /// This flag can appear in votes, but in consensuses, every relay
         /// is assumed to be valid.
-        const VALID = (1<<10);
+        const VALID = (1<<11);
         /// Set if this relay supports a currently recognized version of the
         /// directory protocol.
-        const V2DIR = (1<<11);
+        const V2DIR = (1<<12);
     }
 }
 
@@ -669,6 +690,18 @@ impl<RS> Consensus<RS> {
     /// contains one.
     pub fn shared_rand_prev(&self) -> Option<&SharedRandStatus> {
         self.header.shared_rand_prev.as_ref()
+    }
+
+    /// Return a [`ProtoStatus`] that lists the network's current requirements and
+    /// recommendations for the list of protocols that every relay must implement.  
+    pub fn relay_protocol_status(&self) -> &ProtoStatus {
+        &self.header.hdr.relay_protos
+    }
+
+    /// Return a [`ProtoStatus`] that lists the network's current requirements and
+    /// recommendations for the list of protocols that every client must implement.
+    pub fn client_protocol_status(&self) -> &ProtoStatus {
+        &self.header.hdr.client_protos
     }
 }
 
@@ -885,6 +918,24 @@ impl ProtoStatus {
             recommended,
             required,
         })
+    }
+
+    /// Return the protocols that are listed as "required" in this `ProtoStatus`.
+    ///
+    /// Implementations may assume that relays on the network implement all the
+    /// protocols in the relays' required-protocols list.  Implementations should
+    /// refuse to start if they do not implement all the protocols on their own
+    /// (client or relay) required-protocols list.
+    pub fn required_protocols(&self) -> &Protocols {
+        &self.required
+    }
+
+    /// Return the protocols that are listed as "recommended" in this `ProtoStatus`.
+    ///
+    /// Implementations should warn if they do not implement all the protocols
+    /// on their own (client or relay) recommended-protocols list.
+    pub fn recommended_protocols(&self) -> &Protocols {
+        &self.recommended
     }
 }
 
@@ -1150,6 +1201,7 @@ impl std::str::FromStr for RelayFlags {
             "Fast" => RelayFlags::FAST,
             "Guard" => RelayFlags::GUARD,
             "HSDir" => RelayFlags::HSDIR,
+            "MiddleOnly" => RelayFlags::MIDDLE_ONLY,
             "NoEdConsensus" => RelayFlags::NO_ED_CONSENSUS,
             "Stable" => RelayFlags::STABLE,
             "StaleDesc" => RelayFlags::STALE_DESC,

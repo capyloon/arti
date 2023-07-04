@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -95,7 +97,7 @@ impl tor_error::HasKind for ConnectionError {
             CE::UnsupportedUriScheme{..} => EK::NotImplemented,
             CE::MissingHostname{..}      => EK::BadApiUsage,
             CE::Arti(e)                  => e.kind(),
-            CE::TLS(_)                   => EK::RemoteProtocolFailed,
+            CE::TLS(_)                   => EK::RemoteProtocolViolation,
         }
     }
 }

@@ -1,9 +1,9 @@
 [package]
 name = "tor-hsservice"
-version = "0.1.2"
+version = "0.2.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Arti's implementation of an onion service provider"
@@ -15,16 +15,24 @@ publish = false
 
 [features]
 default = []
+full = [
+    "tor-circmgr/full",
+    "tor-hscrypto/full",
+    "tor-llcrypto/full",
+    "tor-netdir/full",
+    "tor-proto/full",
+    "tor-rtcompat/full",
+]
 
 [dependencies]
-async-trait = "0.1.2"
+async-trait = "0.1.54"
 rand_core = "0.6.2"
 thiserror = "1"
-tor-circmgr = { version = "0.7.3", path = "../tor-circmgr", features = ["hs-service"] }
-tor-hscrypto = { version = "0.1.2", path = "../tor-hscrypto" }
-tor-llcrypto = { version = "0.4.3", path = "../tor-llcrypto" }
-tor-netdir = { version = "0.8.0", path = "../tor-netdir" }
-tor-proto = { version = "0.9.1", path = "../tor-proto" }
-tor-rtcompat = { version = "0.8.1", path = "../tor-rtcompat" }
+tor-circmgr = { version = "0.9.1", path = "../tor-circmgr", features = ["hs-service"] }
+tor-hscrypto = { version = "0.3.0", path = "../tor-hscrypto" }
+tor-llcrypto = { version = "0.5.2", path = "../tor-llcrypto" }
+tor-netdir = { version = "0.9.2", path = "../tor-netdir" }
+tor-proto = { version = "0.11.1", path = "../tor-proto" }
+tor-rtcompat = { version = "0.9.1", path = "../tor-rtcompat" }
 
 [dev-dependencies]

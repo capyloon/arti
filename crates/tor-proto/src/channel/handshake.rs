@@ -1,6 +1,5 @@
 //! Implementations for the channel handshake
 
-use arrayref::array_ref;
 use asynchronous_codec as futures_codec;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures::sink::SinkExt;
@@ -209,7 +208,11 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider>
             if hdr[0..3] != [0, 0, ChanCmd::VERSIONS.into()] {
                 return not_relay();
             }
-            let msglen = u16::from_be_bytes(*array_ref![hdr, 3, 2]);
+            let msglen = u16::from_be_bytes(
+                hdr[3..5]
+                    .try_into()
+                    .expect("Two-byte field was not two bytes!?"),
+            );
             let mut msg = vec![0; msglen as usize];
             self.tls
                 .read_exact(&mut msg)
@@ -425,7 +428,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
 
         // Check the identity->signing cert
         let (id_sk, id_sk_sig) = id_sk
-            .check_key(None)
+            .should_have_signing_key()
             .map_err(Error::HandshakeCertErr)?
             .dangerously_split()
             .map_err(Error::HandshakeCertErr)?;
@@ -445,7 +448,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static, S: SleepProvider> Unver
         // Now look at the signing->TLS cert and check it against the
         // peer certificate.
         let (sk_tls, sk_tls_sig) = sk_tls
-            .check_key(Some(signing_key))
+            .should_be_signed_with(signing_key)
             .map_err(Error::HandshakeCertErr)?
             .dangerously_split()
             .map_err(Error::HandshakeCertErr)?;

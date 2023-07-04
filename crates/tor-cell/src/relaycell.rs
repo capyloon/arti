@@ -5,7 +5,6 @@ use tor_bytes::{EncodeError, EncodeResult, Error, Result};
 use tor_bytes::{Reader, Writer};
 use tor_error::internal;
 
-use arrayref::array_mut_ref;
 use caret::caret_int;
 use rand::{CryptoRng, Rng};
 
@@ -13,7 +12,6 @@ pub mod extend;
 #[cfg(feature = "hs")]
 pub mod hs;
 pub mod msg;
-pub mod restrict;
 #[cfg(feature = "experimental-udp")]
 pub mod udp;
 
@@ -180,7 +178,7 @@ impl StreamId {
 /// A relay cell that has not yet been fully parsed, but where we have access to
 /// the command and stream ID, for dispatching purposes.
 //
-// TODO HS: Settle on some names here. I would prefer "UnparsedRelayMsg" here so
+// TODO prop340: Settle on some names here. I would prefer "UnparsedRelayMsg" here so
 // it can eventually be compatible with proposal 340.  But that would make our
 // RelayCell and RelayMsg types below kind of illogical.  Perhaps we should rename...
 //     this -> UnparsedRelayMsg
@@ -214,7 +212,12 @@ impl UnparsedRelayCell {
     }
     /// Return the stream ID for the stream that this cell corresponds to.
     pub fn stream_id(&self) -> StreamId {
-        u16::from_be_bytes(*arrayref::array_ref![self.body, STREAM_ID_OFFSET, 2]).into()
+        u16::from_be_bytes(
+            self.body[STREAM_ID_OFFSET..STREAM_ID_OFFSET + 2]
+                .try_into()
+                .expect("two-byte slice was not two bytes long!?"),
+        )
+        .into()
     }
     /// Decode this unparsed cell into a given cell type.
     pub fn decode<M: RelayMsg>(self) -> Result<RelayCell<M>> {
@@ -344,7 +347,9 @@ impl<M: RelayMsg> RelayCell<M> {
         })?;
         let payload_len = written - BODY_POS;
         debug_assert!(payload_len < std::u16::MAX as usize);
-        *(array_mut_ref![body.0, LEN_POS, 2]) = (payload_len as u16).to_be_bytes();
+        *(<&mut [u8; 2]>::try_from(&mut body.0[LEN_POS..LEN_POS + 2])
+            .expect("Two-byte slice was not two bytes long!?")) =
+            (payload_len as u16).to_be_bytes();
         Ok((body.0, written))
     }
 

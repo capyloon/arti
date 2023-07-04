@@ -1,9 +1,9 @@
 [package]
 name = "tor-llcrypto"
-version = "0.4.3"
+version = "0.5.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Low level cryptography wrappers used by Tor"
@@ -13,20 +13,29 @@ repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
 
 [features]
 default = []
-with-openssl = ["openssl", "typenum", "cipher"]
-with-sha1-asm = ["sha1/asm"]
+full = ["safelog/full"]
+
+with-openssl = ["openssl", "typenum", "cipher", "__is_nonadditive"]
+with-sha1-asm = ["sha1/asm", "__is_nonadditive"]
+
+experimental = ["relay", "hsv3-client", "hsv3-service", "keymgr"]
 
 # Enable support for cryptography needed to be a Tor relay.
-relay = []
-
+relay = ["cvt-x25519", "__is_experimental"]
 # Enable support for cryptography needed to be an onion service v3 client.
-hsv3-client = []
+hsv3-client = ["__is_experimental"]
 # Enable support for cryptography needed to be an onion service v3 service.
-hsv3-service = []
+hsv3-service = ["__is_experimental"]
+# Enable support for cryptography needed for key management.
+keymgr = ["cvt-x25519", "__is_experimental"]
+# Enable extra support for converting keys to and from x25519
+cvt-x25519 = []
+
+__is_nonadditive = []
+__is_experimental = []
 
 [dependencies]
 aes = { version = "0.8", features = ["zeroize"] }
-arrayref = "0.3"
 base64ct = "1.5.1"
 cipher = { version = "0.4.3", optional = true, features = ["zeroize"] }
 ctr = { version = "0.9", features = ["zeroize"] }
@@ -38,8 +47,8 @@ hex = "0.4"
 old_rand_core = { package = "rand_core", version = "0.5.1" }
 openssl = { version = "0.10.48", optional = true }
 rand_core = "0.6.2"
-rsa = "0.8.0"
-safelog = { version = "0.2.2", path = "../safelog" }
+rsa = "0.9.0"
+safelog = { version = "0.3.2", path = "../safelog" }
 serde = "1.0.103"
 sha1 = "0.10.0"
 sha2 = "0.10.0"
@@ -49,15 +58,15 @@ simple_asn1 = "0.6"
 subtle = "2"
 thiserror = "1"
 typenum = { version = "1.15.0", optional = true }
-x25519-dalek = "2.0.0-pre.1"
+x25519-dalek = { version = "=2.0.0-pre.1" }
 zeroize = "1"
 
 [dev-dependencies]
 cipher = "0.4.1"
-hex-literal = "0.3"
+hex-literal = "0.4"
 rand = "0.8"
 serde_test = "1.0.124"
-tor-basic-utils = { path = "../tor-basic-utils", version = "0.6.0" }
+tor-basic-utils = { path = "../tor-basic-utils", version = "0.7.1" }
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2.3", features = ["js"] }

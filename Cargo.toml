@@ -16,8 +16,10 @@ members = [
     "crates/tor-config",
     "crates/tor-events",
     "crates/tor-units",
+    "crates/tor-geoip",
     "crates/tor-rtcompat",
     "crates/tor-rtmock",
+    "crates/tor-rpcbase",
     "crates/tor-llcrypto",
     "crates/tor-protover",
     "crates/tor-bytes",
@@ -39,9 +41,11 @@ members = [
     "crates/tor-circmgr",
     "crates/tor-dirclient",
     "crates/tor-dirmgr",
+    "crates/tor-keymgr",
     "crates/tor-hsclient",
     "crates/tor-hsservice",
     "crates/arti-client",
+    "crates/arti-rpcserver",
     "crates/arti-config",
     "crates/arti-hyper",
     "crates/arti",
@@ -79,4 +83,3 @@ lto = "thin"
 codegen-units = 16
 opt-level = 2
 incremental = true
-

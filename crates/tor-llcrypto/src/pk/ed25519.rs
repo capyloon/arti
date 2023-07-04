@@ -9,7 +9,6 @@
 //! unvalidated Ed25519 "identity keys" that we use throughout the Tor
 //! protocol to uniquely identify a relay.
 
-use arrayref::array_ref;
 use base64ct::{Base64Unpadded, Encoding as _};
 use std::fmt::{self, Debug, Display, Formatter};
 use subtle::{Choice, ConstantTimeEq};
@@ -23,6 +22,31 @@ pub const ED25519_ID_LEN: usize = 32;
 
 /// The length of an ED25519 signature, in bytes.
 pub const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// A variant of [`Keypair`] containing an [`ExpandedSecretKey`].
+#[allow(clippy::exhaustive_structs)]
+pub struct ExpandedKeypair {
+    /// The secret part of the key.
+    pub secret: ExpandedSecretKey,
+    /// The public part of this key.
+    pub public: PublicKey,
+}
+
+impl ExpandedKeypair {
+    /// Compute a signature over a message using this keypair.
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        self.secret.sign(message, &self.public)
+    }
+}
+
+impl<'a> From<&'a Keypair> for ExpandedKeypair {
+    fn from(kp: &'a Keypair) -> ExpandedKeypair {
+        ExpandedKeypair {
+            secret: (&kp.secret).into(),
+            public: kp.public,
+        }
+    }
+}
 
 /// An unchecked, unvalidated Ed25519 key.
 ///
@@ -65,11 +89,7 @@ impl Ed25519Identity {
     }
     /// If `id` is of the correct length, wrap it in an Ed25519Identity.
     pub fn from_bytes(id: &[u8]) -> Option<Self> {
-        if id.len() == 32 {
-            Some(Ed25519Identity::new(*array_ref!(id, 0, 32)))
-        } else {
-            None
-        }
+        Some(Ed25519Identity::new(id.try_into().ok()?))
     }
     /// Return a reference to the bytes in this key.
     pub fn as_bytes(&self) -> &[u8] {

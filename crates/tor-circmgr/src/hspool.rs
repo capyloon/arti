@@ -1,20 +1,20 @@
 //! Manage a pool of circuits for usage with onion services.
 //
-// TODO HS: We need tests here. First, though, we need a testing strategy.
+// TODO HS TEST: We need tests here. First, though, we need a testing strategy.
 mod pool;
 
 use std::{
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
-use crate::{CircMgr, Error, Result};
+use crate::{timeouts, CircMgr, Error, Result};
 use futures::{task::SpawnExt, StreamExt, TryFutureExt};
 use once_cell::sync::OnceCell;
 use tor_error::{bad_api_usage, internal, ErrorReport};
-use tor_linkspec::{OwnedChanTarget, OwnedCircTarget};
+use tor_linkspec::{CircTarget, OwnedCircTarget};
 use tor_netdir::{NetDir, NetDirProvider, Relay, SubnetConfig};
-use tor_proto::circuit::ClientCirc;
+use tor_proto::circuit::{self, ClientCirc};
 use tor_rtcompat::{
     scheduler::{TaskHandle, TaskSchedule},
     Runtime, SleepProviderExt,
@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 /// We will use this to tell how the path for a given circuit is to be
 /// constructed.
 #[cfg(feature = "hs-common")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum HsCircKind {
     /// Circuit from an onion service to an HsDir.
@@ -48,14 +48,20 @@ pub enum HsCircKind {
 pub struct HsCircPool<R: Runtime> {
     /// An underlying circuit manager, used for constructing circuits.
     circmgr: Arc<CircMgr<R>>,
-    /// A collection of pre-constructed circuits.
-    pool: pool::Pool,
     /// A task handle for making the background circuit launcher fire early.
     //
     // TODO: I think we may want to move this into the same Mutex as Pool
     // eventually.  But for now, this is fine, since it's just an implementation
     // detail.
     launcher_handle: OnceCell<TaskHandle>,
+    /// The mutable state of this pool.
+    inner: Mutex<Inner>,
+}
+
+/// The mutable state of an [`HsCircPool`]
+struct Inner {
+    /// A collection of pre-constructed circuits.
+    pool: pool::Pool,
 }
 
 impl<R: Runtime> HsCircPool<R> {
@@ -67,8 +73,8 @@ impl<R: Runtime> HsCircPool<R> {
         let pool = pool::Pool::default();
         Arc::new(Self {
             circmgr,
-            pool,
             launcher_handle: OnceCell::new(),
+            inner: Mutex::new(Inner { pool }),
         })
     }
 
@@ -111,36 +117,46 @@ impl<R: Runtime> HsCircPool<R> {
     pub async fn get_or_launch_client_rend<'a>(
         &self,
         netdir: &'a NetDir,
-    ) -> Result<(ClientCirc, Relay<'a>)> {
+    ) -> Result<(Arc<ClientCirc>, Relay<'a>)> {
         // For rendezvous points, clients use 3-hop circuits.
-        let circ = self.take_or_launch_stub_circuit(netdir, None).await?;
-        let path = circ.path();
-        match path.last() {
-            Some(ct) => match netdir.by_ids(ct) {
-                Some(relay) => Ok((circ, relay)),
-                // This can't happen, since launch_hs_unmanaged() only takes relays from the netdir
-                // it is given, and circuit_compatible_with_target() ensures that
-                // every relay in the circuit is listed.
-                //
-                // TODO: Still, it's an ugly place in our API; maybe we should return the last hop
-                // from take_or_launch_stub_circuit()?  But in many cases it won't be needed...
-                None => Err(internal!("Got circuit with unknown last hop!?").into()),
-            },
+        let circ = self
+            .take_or_launch_stub_circuit::<OwnedCircTarget>(netdir, None)
+            .await?;
+        let path = circ.path_ref();
+        match path.hops().last() {
+            Some(ent) => {
+                let Some(ct) = ent.as_chan_target() else {
+                    return Err(
+                        internal!("HsPool gave us a circuit with a virtual last hop!?").into(),
+                    );
+                };
+                match netdir.by_ids(ct) {
+                    Some(relay) => Ok((circ, relay)),
+                    // This can't happen, since launch_hs_unmanaged() only takes relays from the netdir
+                    // it is given, and circuit_compatible_with_target() ensures that
+                    // every relay in the circuit is listed.
+                    //
+                    // TODO: Still, it's an ugly place in our API; maybe we should return the last hop
+                    // from take_or_launch_stub_circuit()?  But in many cases it won't be needed...
+                    None => Err(internal!("Got circuit with unknown last hop!?").into()),
+                }
+            }
             None => Err(internal!("Circuit with an empty path!?").into()),
         }
-        // TODO HS: We should retry attempts to build these circuits, either here or in
-        // a higher-level crate.
     }
 
     /// Create a circuit suitable for use for `kind`, ending at the chosen hop `target`.
     ///
     /// Only makes  a single attempt; the caller needs to loop if they want to retry.
-    pub async fn get_or_launch_specific(
+    pub async fn get_or_launch_specific<T>(
         &self,
         netdir: &NetDir,
         kind: HsCircKind,
-        target: OwnedCircTarget,
-    ) -> Result<ClientCirc> {
+        target: T,
+    ) -> Result<Arc<ClientCirc>>
+    where
+        T: CircTarget,
+    {
         // The kind makes no difference yet, but it will at some point in the future.
         match kind {
             HsCircKind::ClientRend => {
@@ -149,7 +165,7 @@ impl<R: Runtime> HsCircPool<R> {
                 )
             }
             HsCircKind::SvcIntro => {
-                // TODO HS: In this case we will want to add an extra hop, once we have vanguards.
+                // TODO HS-VANGUARDS: In this case we will want to add an extra hop, once we have vanguards.
                 // When this happens, the whole match statement will want to become
                 // let extra_hop = match kind {...}
             }
@@ -201,42 +217,42 @@ impl<R: Runtime> HsCircPool<R> {
 
         // With any luck, return the circuit.
         Ok(circ)
-
-        // TODO HS: We should retry attempts to build these circuits, either here or in
-        // a higher-level crate.
     }
 
     /// Take and return a circuit from our pool suitable for being extended to `avoid_target`.
     ///
     /// If there is no such circuit, build and return a new one.
-    async fn take_or_launch_stub_circuit(
+    async fn take_or_launch_stub_circuit<T>(
         &self,
         netdir: &NetDir,
-        avoid_target: Option<&OwnedCircTarget>,
-    ) -> Result<ClientCirc> {
+        avoid_target: Option<&T>,
+    ) -> Result<Arc<ClientCirc>>
+    where
+        T: CircTarget,
+    {
         // First, look for a circuit that is already built, if any is suitable.
         let subnet_config = self.circmgr.builder().path_config().subnet_config();
-        let target = avoid_target.map(|target| TargetInfo {
+        let owned_avoid_target = avoid_target.map(OwnedCircTarget::from_circ_target);
+        let target = owned_avoid_target.as_ref().map(|target| TargetInfo {
             target,
             relay: netdir.by_ids(target),
         });
-        let found_usable_circ = self.pool.take_one_where(&mut rand::thread_rng(), |circ| {
-            circuit_compatible_with_target(netdir, subnet_config, circ, target.as_ref())
-        });
+        let found_usable_circ = {
+            let mut inner = self.inner.lock().expect("lock poisoned");
+            let found_usable_circ = inner.pool.take_one_where(&mut rand::thread_rng(), |circ| {
+                circuit_compatible_with_target(netdir, subnet_config, circ, target.as_ref())
+            });
 
-        /// Tell the background task to fire immediately if we have fewer than
-        /// this many circuits left, or if we found nothing. Chosen arbitrarily.
-        ///
-        /// TODO HS: This should change dynamically, and probably be a fixed
-        /// fraction of TARGET_N.
-        const LAUNCH_THRESHOLD: usize = 2;
-        if self.pool.len() < LAUNCH_THRESHOLD || found_usable_circ.is_none() {
-            let handle = self.launcher_handle.get().ok_or_else(|| {
-                Error::from(bad_api_usage!("The circuit launcher wasn't initialized"))
-            })?;
-            handle.fire();
-        }
-
+            // Tell the background task to fire immediately if we have very few circuits
+            // circuits left, or if we found nothing.
+            if inner.pool.very_low() || found_usable_circ.is_none() {
+                let handle = self.launcher_handle.get().ok_or_else(|| {
+                    Error::from(bad_api_usage!("The circuit launcher wasn't initialized"))
+                })?;
+                handle.fire();
+            }
+            found_usable_circ
+        };
         // Return the circuit we found before, if any.
         if let Some(circuit) = found_usable_circ {
             return Ok(circuit);
@@ -253,25 +269,56 @@ impl<R: Runtime> HsCircPool<R> {
 
     /// Internal: Remove every closed circuit from this pool.
     fn remove_closed(&self) {
-        self.pool.retain(|circ| !circ.is_closing());
+        let mut inner = self.inner.lock().expect("lock poisoned");
+        inner.pool.retain(|circ| !circ.is_closing());
     }
 
     /// Internal: Remove every circuit form this pool for which any relay is not
     /// listed in `netdir`.
     fn remove_unlisted(&self, netdir: &NetDir) {
-        self.pool
-            .retain(|circ| all_circ_relays_are_listed_in(circ, netdir));
+        let mut inner = self.inner.lock().expect("lock poisoned");
+        inner
+            .pool
+            .retain(|circ| circuit_still_useable(netdir, circ, |_relay| true));
+    }
+
+    /// Return an estimate-based delay for how long a given
+    /// [`Action`](timeouts::Action) should be allowed to complete.
+    ///
+    /// This function has the same semantics as
+    /// [`CircMgr::estimate_timeout`].
+    /// See the notes there.
+    ///
+    /// In particular **you do not need to use this function** in order to get
+    /// reasonable timeouts for the circuit-building operations provided by `HsCircPool`.
+    //
+    // In principle we could have made this available by making `HsCircPool` `Deref`
+    // to `CircMgr`, but we don't want to do that because `CircMgr` has methods that
+    // operate on *its* pool which is separate from the pool maintained by `HsCircPool`.
+    //
+    // We *might* want to provide a method to access the underlying `CircMgr`
+    // but that has the same issues, albeit less severely.
+    pub fn estimate_timeout(&self, timeout_action: &timeouts::Action) -> std::time::Duration {
+        self.circmgr.estimate_timeout(timeout_action)
     }
 }
 
 /// Wrapper around a target final hop, and any information about that target we
 /// were able to find from the directory.
 ///
+/// We don't use this for _extending_ to the final hop, since it contains an
+/// OwnedCircTarget, which may not preserve all the
+/// [`LinkSpec`](tor_linkspec::LinkSpec)s in the right order.  We only use it
+/// for assessing circuit compatibility.
+///
 /// TODO: This is possibly a bit redundant with path::MaybeOwnedRelay.  We
 /// should consider merging them someday, once we have a better sense of what we
 /// truly want here.
 struct TargetInfo<'a> {
     /// The target to be used as a final hop.
+    //
+    // TODO: Perhaps this should be a generic &dyn CircTarget? I'm not sure we
+    // win anything there, though.
     target: &'a OwnedCircTarget,
     /// A Relay reference for the targe, if we found one.
     relay: Option<Relay<'a>>,
@@ -304,40 +351,41 @@ fn circuit_compatible_with_target(
     circ: &ClientCirc,
     target: Option<&TargetInfo<'_>>,
 ) -> bool {
+    circuit_still_useable(netdir, circ, |relay| match target {
+        Some(t) => t.may_share_circuit_with(relay, subnet_config),
+        None => true,
+    })
+}
+
+/// Return true if we can still use a given pre-build circuit.
+///
+/// We require that the circuit is open, that every hop  in the circuit is
+/// listed in `netdir`, and that `relay_okay` returns true for every hop on the
+/// circuit.
+fn circuit_still_useable<F>(netdir: &NetDir, circ: &ClientCirc, relay_okay: F) -> bool
+where
+    F: Fn(&Relay<'_>) -> bool,
+{
     if circ.is_closing() {
         return false;
     }
 
-    // TODO HS: I don't like having to copy the whole path out at this point; it
-    // seems like that could get expensive. -nickm
-
-    let path = circ.path();
-    path.iter().all(|c: &OwnedChanTarget| {
-        match (target, netdir.by_ids(c)) {
+    let path = circ.path_ref();
+    // (We have to use a binding here to appease borrowck.)
+    let all_compatible = path.iter().all(|ent: &circuit::PathEntry| {
+        let Some(c) = ent.as_chan_target() else {
+            // This is a virtual hop; it's necessarily compatible with everything.
+            return true;
+        };
+        let Some(relay) = netdir.by_ids(c) else {
             // We require that every relay in this circuit is still listed; an
             // unlisted relay means "reject".
-            (_, None) => false,
-            // If we have a target, the relay must be compatible with it.
-            (Some(t), Some(r)) => t.may_share_circuit_with(&r, subnet_config),
-            // If we have no target, any listed relay is okay.
-            (None, Some(_)) => true,
-        }
-    })
-}
-
-/// Return true if  every relay in `circ` is listed in `netdir`.
-fn all_circ_relays_are_listed_in(circ: &ClientCirc, netdir: &NetDir) -> bool {
-    // TODO HS: Again, I don't like having to copy the whole path out at this point.
-    let path = circ.path();
-
-    // TODO HS: Are there any other checks we should do before declaring that
-    // this is still usable?
-
-    // TODO HS: There is some duplicate logic here and in
-    // circuit_compatible_with_target.  I think that's acceptable for now, but
-    // we should consider refactoring if these functions grow.
-    path.iter()
-        .all(|c: &OwnedChanTarget| netdir.by_ids(c).is_some())
+            return false;
+        };
+        // Now it's all down to the predicate.
+        relay_okay(&relay)
+    });
+    all_compatible
 }
 
 /// Background task to launch onion circuits as needed.
@@ -346,10 +394,6 @@ async fn launch_hs_circuits_as_needed<R: Runtime>(
     netdir_provider: Weak<dyn NetDirProvider + 'static>,
     mut schedule: TaskSchedule<R>,
 ) {
-    /// Number of circuits to keep in the pool.  Chosen arbitrarily.
-    //
-    // TODO HS: This should instead change dynamically based on observed needs.
-    const TARGET_N: usize = 8;
     /// Default delay when not told to fire explicitly. Chosen arbitrarily.
     const DELAY: Duration = Duration::from_secs(30);
 
@@ -360,9 +404,14 @@ async fn launch_hs_circuits_as_needed<R: Runtime>(
                 break;
             }
         };
+        let now = pool.circmgr.mgr.peek_runtime().now();
         pool.remove_closed();
-        let mut n_to_launch = pool.pool.len().saturating_sub(TARGET_N);
-        let mut max_attempts = TARGET_N * 2;
+        let mut n_to_launch = {
+            let mut inner = pool.inner.lock().expect("poisioned_lock");
+            inner.pool.update_target_size(now);
+            inner.pool.n_to_launch()
+        };
+        let mut max_attempts = n_to_launch * 2;
         'inner: while n_to_launch > 1 {
             max_attempts -= 1;
             if max_attempts == 0 {
@@ -382,7 +431,7 @@ async fn launch_hs_circuits_as_needed<R: Runtime>(
                 // TODO HS: We should catch panics, here or in launch_hs_unmanaged.
                 match pool.circmgr.launch_hs_unmanaged(no_target, &netdir).await {
                     Ok(circ) => {
-                        pool.pool.insert(circ);
+                        pool.inner.lock().expect("poisoned lock").pool.insert(circ);
                         n_to_launch -= 1;
                     }
                     Err(err) => {

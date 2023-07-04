@@ -1,6 +1,6 @@
 //! Convenience implementation of a TimeBound object.
 
-use std::ops::{Bound, RangeBounds};
+use std::ops::{Bound, Deref, RangeBounds};
 use std::time;
 
 /// A TimeBound object that is valid for a specified range of time.
@@ -26,6 +26,8 @@ use std::time;
 ///            Err(TimeValidityError::Expired(one_hour)));
 ///
 /// ```
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(Eq, PartialEq))]
 pub struct TimerangeBound<T> {
     /// The underlying object, which we only want to expose if it is
     /// currently timely.
@@ -103,13 +105,9 @@ impl<T> TimerangeBound<T> {
     /// The caller takes responsibility for making sure that the bounds are
     /// actually checked.
     pub fn dangerously_into_parts(self) -> (T, (Bound<time::SystemTime>, Bound<time::SystemTime>)) {
-        (
-            self.obj,
-            (
-                self.start.map(Bound::Included).unwrap_or(Bound::Unbounded),
-                self.end.map(Bound::Included).unwrap_or(Bound::Unbounded),
-            ),
-        )
+        let bounds = self.bounds();
+
+        (self.obj, bounds)
     }
 
     /// Return a reference to the inner object of this TimeRangeBound, without
@@ -120,6 +118,47 @@ impl<T> TimerangeBound<T> {
     /// the bounds are (eventually) checked.
     pub fn dangerously_peek(&self) -> &T {
         &self.obj
+    }
+
+    /// Return a `TimerangeBound` containing a reference
+    ///
+    /// This can be useful to call methods like `.check_valid_at`
+    /// without consuming the inner `T`.
+    pub fn as_ref(&self) -> TimerangeBound<&T> {
+        TimerangeBound {
+            obj: &self.obj,
+            start: self.start,
+            end: self.end,
+        }
+    }
+
+    /// Return a `TimerangeBound` containing a reference to `T`'s `Deref`
+    pub fn as_deref(&self) -> TimerangeBound<&T::Target>
+    where
+        T: Deref,
+    {
+        self.as_ref().dangerously_map(|t| &**t)
+    }
+
+    /// Return the underlying time bounds of this object.
+    pub fn bounds(&self) -> (Bound<time::SystemTime>, Bound<time::SystemTime>) {
+        (self.start_bound().cloned(), self.end_bound().cloned())
+    }
+}
+
+impl<T> RangeBounds<time::SystemTime> for TimerangeBound<T> {
+    fn start_bound(&self) -> Bound<&time::SystemTime> {
+        self.start
+            .as_ref()
+            .map(Bound::Included)
+            .unwrap_or(Bound::Unbounded)
+    }
+
+    fn end_bound(&self) -> Bound<&time::SystemTime> {
+        self.end
+            .as_ref()
+            .map(Bound::Included)
+            .unwrap_or(Bound::Unbounded)
     }
 }
 
@@ -277,5 +316,17 @@ mod test {
 
         let val = tb.check_valid_at(&(t1 + 1 * min)).unwrap();
         assert_eq!(val, 289);
+    }
+
+    #[test]
+    fn test_as_ref() {
+        let t1 = SystemTime::now();
+        let min = Duration::from_secs(60);
+
+        let tb1: TimerangeBound<String> = TimerangeBound::new("hi".into(), t1..t1 + 5 * min);
+        let tb2: TimerangeBound<&String> = tb1.as_ref();
+        let tb3: TimerangeBound<&str> = tb1.as_deref();
+        assert_eq!(tb1, tb2.dangerously_map(|s| s.clone()));
+        assert_eq!(tb1, tb3.dangerously_map(|s| s.to_owned()));
     }
 }

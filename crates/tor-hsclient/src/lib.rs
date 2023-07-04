@@ -25,6 +25,8 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
 #![deny(clippy::ref_option_ref)]
 #![warn(clippy::semicolon_if_nothing_returned)]
@@ -42,24 +44,39 @@ mod connect;
 mod err;
 mod isol_map;
 mod keys;
+mod proto_oneshot;
+mod relay_info;
 mod state;
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use futures::stream::BoxStream;
+use futures::task::SpawnExt as _;
+use futures::StreamExt as _;
 
 use educe::Educe;
+use tracing::debug;
 
 use tor_circmgr::hspool::HsCircPool;
 use tor_circmgr::isolation::StreamIsolation;
+use tor_error::{internal, Bug};
 use tor_hscrypto::pk::HsId;
 use tor_netdir::NetDir;
 use tor_proto::circuit::ClientCirc;
 use tor_rtcompat::Runtime;
 
-pub use err::{ConnError, StartupError};
-pub use keys::{HsClientSecretKeys, HsClientSecretKeysBuilder};
+pub use err::FailedAttemptError;
+pub use err::{ConnError, DescriptorError, DescriptorErrorDetail, StartupError};
+pub use keys::{
+    HsClientKeyRole, HsClientSecretKeySpecifier, HsClientSecretKeys, HsClientSecretKeysBuilder,
+    HsClientSpecifier,
+};
+pub use relay_info::InvalidTarget;
+pub use state::HsClientConnectorConfig;
 
-use state::Services;
+use err::{rend_pt_identity_for_error, IntroPtIndex, RendPtIdentityForError};
+use state::{Config, MockableConnectorData, Services};
 
 /// An object that negotiates connections with onion services
 ///
@@ -88,18 +105,34 @@ pub struct HsClientConnector<R: Runtime, D: state::MockableConnectorData = conne
 
 impl<R: Runtime> HsClientConnector<R, connect::Data> {
     /// Create a new `HsClientConnector`
+    ///
+    /// `housekeeping_prompt` should yield "occasionally",
+    /// perhaps every few hours or maybe daily.
+    ///
+    /// In Arti we arrange for this to happen when we have a new consensus.
+    ///
+    /// Housekeeping events shouldn't arrive while we're dormant,
+    /// since the housekeeping might involve processing that ought to be deferred.
+    // This ^ is why we don't have a separate "launch background tasks" method.
+    // It is fine for this background task to be launched pre-bootstrap, since it willp
+    // do nothing until it gets events.
     pub fn new(
         runtime: R,
         circpool: Arc<HsCircPool<R>>,
-        // TODO HS: there should be a config here, we will probably need it at some point
-        // TODO HS: will needs a periodic task handle for us to expire old HS data/circuits
+        config: &impl HsClientConnectorConfig,
+        housekeeping_prompt: BoxStream<'static, ()>,
     ) -> Result<Self, StartupError> {
-        Ok(HsClientConnector {
+        let config = Config {
+            retry: config.as_ref().clone(),
+        };
+        let connector = HsClientConnector {
             runtime,
             circpool,
-            services: Arc::new(Mutex::new(Services::default())),
+            services: Arc::new(Mutex::new(Services::new(config))),
             mock_for_state: (),
-        })
+        };
+        connector.spawn_housekeeping_task(housekeeping_prompt)?;
+        Ok(connector)
     }
 
     /// Connect to a hidden service
@@ -118,12 +151,49 @@ impl<R: Runtime> HsClientConnector<R, connect::Data> {
         hs_id: HsId,
         secret_keys: HsClientSecretKeys,
         isolation: StreamIsolation,
-    ) -> impl Future<Output = Result<ClientCirc, ConnError>> + Send + Sync + 'r {
+    ) -> impl Future<Output = Result<Arc<ClientCirc>, ConnError>> + Send + Sync + 'r {
         // As in tor-circmgr,  we take `StreamIsolation`, to ensure that callers in
         // arti-client pass us the final overall isolation,
         // including the per-TorClient isolation.
         // But internally we need a Box<dyn Isolation> since we need .join().
         let isolation = Box::new(isolation);
         Services::get_or_launch_connection(self, netdir, hs_id, isolation, secret_keys)
+    }
+}
+
+impl<R: Runtime, D: MockableConnectorData> HsClientConnector<R, D> {
+    /// Lock the `Services` table and return the guard
+    ///
+    /// Convenience method
+    fn services(&self) -> Result<MutexGuard<Services<D>>, Bug> {
+        self.services
+            .lock()
+            .map_err(|_| internal!("HS connector poisoned"))
+    }
+
+    /// Spawn a task which watches `prompt` and calls [`Services::run_housekeeping`]
+    fn spawn_housekeeping_task(
+        &self,
+        mut prompt: BoxStream<'static, ()>,
+    ) -> Result<(), StartupError> {
+        self.runtime
+            .spawn({
+                let connector = self.clone();
+                let runtime = self.runtime.clone();
+                async move {
+                    while let Some(()) = prompt.next().await {
+                        let Ok(mut services) = connector.services()
+                        else { break };
+
+                        // (Currently) this is "expire old data".
+                        services.run_housekeeping(runtime.now());
+                    }
+                    debug!("HS connector housekeeping task exiting (EOF on prompt stream)");
+                }
+            })
+            .map_err(|cause| StartupError::Spawn {
+                spawning: "housekeeping task",
+                cause: cause.into(),
+            })
     }
 }

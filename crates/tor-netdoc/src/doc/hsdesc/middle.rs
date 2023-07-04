@@ -1,12 +1,13 @@
 //! Handle the middle document of an onion service descriptor.
 
-use digest::XofReader;
 use once_cell::sync::Lazy;
+use subtle::ConstantTimeEq;
 use tor_hscrypto::pk::{HsBlindId, HsClientDescEncSecretKey, HsSvcDescEncKey};
 use tor_hscrypto::{RevisionCounter, Subcredential};
 use tor_llcrypto::pk::curve25519;
 use tor_llcrypto::util::ct::CtByteArray;
 
+use crate::doc::hsdesc::desc_enc::build_descriptor_cookie_key;
 use crate::parse::tokenize::{Item, NetDocReader};
 use crate::parse::{keyword::Keyword, parser::SectionRules};
 use crate::types::misc::B64;
@@ -15,10 +16,11 @@ use crate::{Pos, Result};
 use super::desc_enc::{
     HsDescEncNonce, HsDescEncryption, HS_DESC_CLIENT_ID_LEN, HS_DESC_ENC_NONCE_LEN, HS_DESC_IV_LEN,
 };
-use super::DecryptionError;
+use super::HsDescError;
 
-/// TODO hs: This should be an enum.
 /// The only currently recognized `desc-auth-type`.
+//
+// TODO: In theory this should be an enum, if we ever add a second value here.
 pub(super) const HS_DESC_AUTH_TYPE: &str = "x25519";
 
 /// A more-or-less verbatim representation of the middle document of an onion
@@ -59,7 +61,7 @@ impl HsDescMiddle {
         revision: RevisionCounter,
         subcredential: &Subcredential,
         key: Option<&HsClientDescEncSecretKey>,
-    ) -> std::result::Result<Vec<u8>, DecryptionError> {
+    ) -> std::result::Result<Vec<u8>, super::HsDescError> {
         let desc_enc_nonce = key.and_then(|k| self.find_cookie(subcredential, k));
         let decrypt = HsDescEncryption {
             blinded_id,
@@ -69,7 +71,14 @@ impl HsDescMiddle {
             string_const: b"hsdir-encrypted-data",
         };
 
-        decrypt.decrypt(&self.encrypted)
+        match decrypt.decrypt(&self.encrypted) {
+            Ok(v) => Ok(v),
+            Err(_) => match (key, desc_enc_nonce) {
+                (Some(_), None) => Err(HsDescError::WrongDecryptionKey),
+                (Some(_), Some(_)) => Err(HsDescError::DecryptionFailed),
+                (None, _) => Err(HsDescError::MissingDecryptionKey),
+            },
+        }
     }
 
     /// Use a `ClientDescAuthSecretKey` (`KS_hsc_desc_enc`) to see if there is any `auth-client`
@@ -88,43 +97,16 @@ impl HsDescMiddle {
         ks_hsc_desc_enc: &HsClientDescEncSecretKey,
     ) -> Option<HsDescEncNonce> {
         use cipher::{KeyIvInit, StreamCipher};
-        use digest::{ExtendableOutput, Update};
         use tor_llcrypto::cipher::aes::Aes256Ctr as Cipher;
-        use tor_llcrypto::d::Shake256 as KDF;
+        use tor_llcrypto::util::ct::ct_lookup;
 
-        // Perform a diffie hellman handshake using `KS_hsc_desc_enc` and `KP_hss_desc_enc`,
-        // and use it to find our client_id and cookie_key.
-        //
-        // The spec says:
-        //
-        //     SECRET_SEED = x25519(hs_y, client_X)
-        //                 = x25519(client_y, hs_X)
-        //     KEYS = KDF(N_hs_subcred | SECRET_SEED, 40)
-        //     CLIENT-ID = fist 8 bytes of KEYS
-        //     COOKIE-KEY = last 32 bytes of KEYS
-        //
-        // Where:
-        //     hs_{X,y} = K{P,S}_hss_desc_enc
-        //     client_{X,Y} = K{P,S}_hsc_desc_enc
-        let secret_seed = ks_hsc_desc_enc
-            .as_ref()
-            .diffie_hellman(&self.svc_desc_enc_key);
-        let mut kdf = KDF::default();
-        kdf.update(subcredential.as_ref());
-        kdf.update(secret_seed.as_bytes());
-        let mut keys = kdf.finalize_xof();
-        let mut client_id = CtByteArray::from([0_u8; 8]);
-        let mut cookie_key = [0_u8; 32];
-        keys.read(client_id.as_mut());
-        keys.read(&mut cookie_key);
-
+        let (client_id, cookie_key) = build_descriptor_cookie_key(
+            ks_hsc_desc_enc.as_ref(),
+            &self.svc_desc_enc_key,
+            subcredential,
+        );
         // See whether there is any matching client_id in self.auth_ids.
-        // TODO HS: Perhaps we should use `tor_proto::util::ct::lookup`.  We would
-        // have to put it in a lower level module.
-        let auth_client = self
-            .auth_clients
-            .iter()
-            .find(|c| c.client_id == client_id)?;
+        let auth_client = ct_lookup(&self.auth_clients, |c| c.client_id.ct_eq(&client_id))?;
 
         // We found an auth client entry: Take and decrypt the cookie `N_hs_desc_enc` at last.
         let mut cookie = auth_client.encrypted_cookie;
@@ -137,15 +119,15 @@ impl HsDescMiddle {
 /// Information that a single authorized client can use to decrypt the onion
 /// service descriptor.
 #[derive(Debug, Clone)]
-pub struct AuthClient {
+pub(super) struct AuthClient {
     /// A check field that clients can use to see if this [`AuthClient`] entry corresponds to a key they hold.
     ///
     /// This is the first part of the `auth-client` line.
-    pub(crate) client_id: CtByteArray<HS_DESC_CLIENT_ID_LEN>,
+    pub(super) client_id: CtByteArray<HS_DESC_CLIENT_ID_LEN>,
     /// An IV used to decrypt `encrypted_cookie`.
     ///
     /// This is the second item on the `auth-client` line.
-    pub(crate) iv: [u8; HS_DESC_IV_LEN],
+    pub(super) iv: [u8; HS_DESC_IV_LEN],
     /// An encrypted value used to find the descriptor cookie `N_hs_desc_enc`,
     /// which in turn is
     /// needed to decrypt the [HsDescMiddle]'s `encrypted_body`.
@@ -153,13 +135,13 @@ pub struct AuthClient {
     /// This is the third item on the `auth-client` line.  When decrypted, it
     /// reveals a `DescEncEncryptionCookie` (`N_hs_desc_enc`, not yet so named
     /// in the spec).
-    pub(crate) encrypted_cookie: [u8; HS_DESC_ENC_NONCE_LEN],
+    pub(super) encrypted_cookie: [u8; HS_DESC_ENC_NONCE_LEN],
 }
 
 impl AuthClient {
     /// Try to extract an AuthClient from a single AuthClient item.
     fn from_item(item: &Item<'_, HsMiddleKwd>) -> Result<Self> {
-        use crate::ParseErrorKind as EK;
+        use crate::NetdocErrorKind as EK;
 
         if item.kwd() != HsMiddleKwd::AUTH_CLIENT {
             return Err(EK::Internal.with_msg("called with invalid argument."));
@@ -213,7 +195,7 @@ impl HsDescMiddle {
     ///
     /// The reader must contain a single HsDescOuter; we return an error if not.
     fn take_from_reader(reader: &mut NetDocReader<'_, HsMiddleKwd>) -> Result<HsDescMiddle> {
-        use crate::ParseErrorKind as EK;
+        use crate::NetdocErrorKind as EK;
         use HsMiddleKwd::*;
 
         let body = HS_MIDDLE_RULES.parse(reader)?;
@@ -221,7 +203,7 @@ impl HsDescMiddle {
         // Check for the only currently recognized `desc-auth-type`
         {
             let auth_type = body.required(DESC_AUTH_TYPE)?.required_arg(0)?;
-            if auth_type != "x25519" {
+            if auth_type != HS_DESC_AUTH_TYPE {
                 return Err(EK::BadDocumentVersion
                     .at_pos(Pos::at(auth_type))
                     .with_msg(format!("Unrecognized desc-auth-type {auth_type:?}")));
@@ -266,12 +248,13 @@ mod test {
     #![allow(clippy::unchecked_duration_subtraction)]
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
 
+    use hex_literal::hex;
     use tor_checkable::{SelfSigned, Timebound};
 
     use super::*;
     use crate::doc::hsdesc::{
         outer::HsDescOuter,
-        test::{TEST_DATA, TEST_SUBCREDENTIAL},
+        test_data::{TEST_DATA, TEST_SUBCREDENTIAL},
     };
 
     #[test]
@@ -284,15 +267,23 @@ mod test {
         let body = std::str::from_utf8(&body[..]).unwrap();
 
         let middle = HsDescMiddle::parse(body)?;
+        assert_eq!(
+            middle.svc_desc_enc_key.as_bytes(),
+            &hex!("161090571E6DB517C0C8591CE524A56DF17BAE3FF8DCD50735F9AEB89634073E")
+        );
+        assert_eq!(middle.auth_clients.len(), 16);
 
-        // TODO hs: assert that the fields here are expected.
-
-        // TODO hs: write a test for the case where we _do_ have an encryption key.
-        let inner_body = middle
+        // Here we make sure that decryption "works" minimally and returns some
+        // bytes for a descriptor with no HsClientDescEncSecretKey.
+        //
+        // We make sure that the actual decrypted value is reasonable elsewhere,
+        // in the tests in inner.rs.
+        //
+        // We test the case where a HsClientDescEncSecretKey is needed
+        // elsewhere, in `hsdesc::test::parse_desc_auth_good`.
+        let _inner_body = middle
             .decrypt_inner(&desc.blinded_id(), desc.revision_counter(), &subcred, None)
             .unwrap();
-
-        // dbg!(std::str::from_utf8(&inner_body).unwrap());
 
         Ok(())
     }

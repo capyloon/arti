@@ -64,17 +64,30 @@ rust-checks:
   script:
     - rustup show
     - rustup component add rustfmt
-    - ./maint/via-cargo-install-in-ci cargo-audit cargo-sort cargo-license
+    - ./maint/via-cargo-install-in-ci cargo-sort cargo-license
     - cargo fmt -- --check
     - ./maint/check_licenses
-    - ./maint/cargo_audit
     - ./maint/cargo_sort
     - ./maint/check_tree
   cache:
     paths:
-      - cargo-audit
       - cargo-sort
       - cargo-license
+
+cargo-audit:
+  # This can start to fail even when our code doesn't change.
+  # Usually the new advisory is not a huge concern.
+  # Run it last, separately, so if we think we may want to merge anyway,
+  # all the other tests will have been run.
+  stage: test
+  image: rust:latest
+  script:
+    - rustup show
+    - ./maint/via-cargo-install-in-ci cargo-audit
+    - ./maint/cargo_audit
+  cache:
+    paths:
+      - cargo-audit
 
 rust-latest:
   stage: build
@@ -130,7 +143,7 @@ rust-nightly:
     # and similar, for when nightly clippy has false positives.  (There is no builtin
     # cfg flag for nightly, and a cargo "feature" would be bad with --all-features.)
     - (echo; cat clippy-nightly.toml) >>clippy.toml
-    - cargo clippy --all-features --tests -- --cfg ci_arti_nightly -D clippy::dbg_macro -D clippy::print_stdout -D clippy::print_stderr
+    - cargo clippy --all-features --tests -- --cfg ci_arti_nightly -D clippy::dbg_macro
     - RUSTDOCFLAGS="-Dwarnings --cfg docsrs" cargo doc --all-features --document-private-items --no-deps
   after_script:
     - cargo clean
@@ -162,7 +175,7 @@ coverage:
 
 minimal-versions:
   stage: test
-  image: rust:1.60
+  image: rust:1.65
   script:
     - rustup install nightly
     - ./maint/downgrade_dependencies
@@ -179,7 +192,7 @@ build-repro:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG != null
   stage: build
   # If you upgrade this image, also change the one in docker_reproducible_build
-  image: rust:1.63.0-alpine3.16
+  image: rust:1.68.2-alpine3.17
   script:
     - apk add bash
     - ./maint/reproducible_build linux windows macos
@@ -200,6 +213,7 @@ build-repro:
 integration-chutney:
   stage: test
   image: debian:stable-slim
+  allow_failure: true
   script:
     - ./maint/preserve -u
     - apt update
@@ -219,11 +233,11 @@ integration-shadow:
   variables:
     JOB_SHADOW_REPO: "https://github.com/shadow/shadow.git"
     JOB_SHADOW_BRANCH: "main"
-    JOB_SHADOW_COMMIT: "v2.3.0"
+    JOB_SHADOW_COMMIT: "v3.0.0"
 
     JOB_TGEN_REPO: "https://github.com/shadow/tgen.git"
     JOB_TGEN_BRANCH: "main"
-    JOB_TGEN_COMMIT: "v1.1.1"
+    JOB_TGEN_COMMIT: "30c95bbe723ebe5e4d068adfd975b094e00dbe10"
   stage: test
   cache:
     - key: $CI_JOB_NAME-shadow-$JOB_SHADOW_COMMIT
@@ -303,6 +317,30 @@ integration-shadow:
   tags:
     - amd64
     - tpa
+
+rust-latest-test-all-features:
+  stage: test
+  image: rust:latest
+  script:
+    - rustup show
+    - cargo build --target x86_64-unknown-linux-gnu --locked --workspace --all-features --all-targets
+    - cargo test --target x86_64-unknown-linux-gnu --locked --workspace --all-features
+  after_script:
+    - ./maint/preserve target/x86_64-unknown-linux-gnu/debug/arti target/x86_64-unknown-linux-gnu/release/arti-bench
+    - cargo clean
+  artifacts:
+    paths:
+      - artifacts
+    expire_in: 1 hours
+  tags:
+    - amd64
+
+every-crate:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y python3-toml python-is-python3
+    - ./maint/every-crate
 
 matrix-test:
   stage: test

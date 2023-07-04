@@ -4,6 +4,10 @@
 //! Once the client is bootstrapped, you can make anonymous
 //! connections ("streams") over the Tor network using
 //! [`TorClient::connect`].
+
+#[cfg(feature = "rpc")]
+mod rpc;
+
 use crate::address::{IntoTorAddr, ResolveInstructions, StreamInstructions};
 
 use crate::config::{ClientAddrConfig, StreamTimeoutConfig, TorClientConfig};
@@ -27,11 +31,19 @@ use tor_proto::stream::{DataStream, IpVersionPreference, StreamParameters};
 ))]
 use tor_rtcompat::PreferredRuntime;
 use tor_rtcompat::{Runtime, SleepProviderExt};
-#[cfg(feature = "onion-client")]
+#[cfg(feature = "onion-service-client")]
 use {
     tor_circmgr::hspool::HsCircPool,
-    tor_hsclient::{HsClientConnector, HsClientSecretKeys},
+    tor_config::BoolOrAuto,
+    tor_hsclient::{
+        HsClientConnector, HsClientKeyRole, HsClientSecretKeySpecifier, HsClientSecretKeysBuilder,
+        HsClientSpecifier,
+    },
+    tor_hscrypto::pk::{HsClientDescEncSecretKey, HsClientIntroAuthKeypair},
+    tor_netdir::DirEvent,
 };
+
+use tor_keymgr::{ArtiNativeKeystore, KeyMgr, Keystore};
 
 use educe::Educe;
 use futures::lock::Mutex as AsyncMutex;
@@ -98,9 +110,23 @@ pub struct TorClient<R: Runtime> {
     #[cfg(feature = "pt-client")]
     pt_mgr: Arc<tor_ptmgr::PtMgr<R>>,
     /// HS client connector
-    #[allow(dead_code)] // TODO HS remove
-    #[cfg(feature = "onion-client")]
+    #[cfg(feature = "onion-service-client")]
     hsclient: HsClientConnector<R>,
+    /// The key manager.
+    ///
+    /// This is used for retrieving private keys, certificates, and other sensitive data (for
+    /// example, for retrieving the keys necessary for connecting to hidden services that require
+    /// client authentication).
+    ///
+    /// If this crate is compiled _with_ the `keymgr` feature, [`TorClient`] will use a functional
+    /// key manager implementation.
+    ///
+    /// If this crate is compiled _without_ the `keymgr` feature, then [`TorClient`] will use a
+    /// no-op key manager implementation instead.
+    ///
+    /// See the [`KeyMgr`] documentation for more details.
+    #[allow(dead_code)] // TODO HS remove
+    keymgr: Arc<KeyMgr>,
     /// Guard manager
     #[cfg_attr(not(feature = "bridge-client"), allow(dead_code))]
     guardmgr: GuardMgr<R>,
@@ -169,7 +195,8 @@ pub enum DormantMode {
 }
 
 /// Preferences for how to route a stream over the Tor network.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Educe)]
+#[educe(Default)]
 pub struct StreamPrefs {
     /// What kind of IPv6/IPv4 we'd prefer, and how strongly.
     ip_ver_pref: IpVersionPreference,
@@ -178,9 +205,10 @@ pub struct StreamPrefs {
     /// Whether to return the stream optimistically.
     optimistic_stream: bool,
     /// Whether to try to make connections to onion services.
-    #[cfg(feature = "hs-client")]
-    #[allow(dead_code)]
-    connect_to_onion_services: bool, // TODO hs: this should default to "true".
+    ///
+    /// `Auto` means to use the client configuration.
+    #[cfg(feature = "onion-service-client")]
+    pub(crate) connect_to_onion_services: BoolOrAuto,
 }
 
 /// Record of how we are isolating connections
@@ -276,8 +304,30 @@ impl StreamPrefs {
         self
     }
 
-    // TODO hs: make setters for the `connect_to_onion_services` field.
-
+    /// Indicate whether connection to a hidden service (`.onion` service) should be allowed
+    ///
+    /// If `Explicit(false)`, attempts to connect to Onion Services will be forced to fail with
+    /// an error of kind [`InvalidStreamTarget`](crate::ErrorKind::InvalidStreamTarget).
+    ///
+    /// If `Explicit(true)`, Onion Service connections are enabled.
+    ///
+    /// If `Auto`, the behaviour depends on the `address_filter.allow_onion_addrs`
+    /// configuration option, which is in turn **disabled** by default.
+    ///
+    /// **Note**: Arti currently lacks the
+    /// "vanguards" feature that Tor uses to prevent guard discovery attacks over time.
+    /// As such, you should probably stick with C Tor if you need to make a large
+    /// number of onion service connections, or if you are using the Tor protocol
+    /// in a way that lets an attacker control how many onion services connections that you make -
+    /// for example, when using Arti's SOCKS support from a web browser such as Tor Browser.
+    #[cfg(feature = "onion-service-client")]
+    pub fn connect_to_onion_services(
+        &mut self,
+        connect_to_onion_services: BoolOrAuto,
+    ) -> &mut Self {
+        self.connect_to_onion_services = connect_to_onion_services;
+        self
+    }
     /// Return a TargetPort to describe what kind of exit policy our
     /// target circuit needs to support.
     fn wrap_target_port(&self, port: u16) -> TargetPort {
@@ -432,7 +482,7 @@ impl<R: Runtime> TorClient<R> {
     /// double error conversions.
     pub(crate) fn create_inner(
         runtime: R,
-        config: TorClientConfig,
+        config: &TorClientConfig,
         autobootstrap: BootstrapBehavior,
         dirmgr_builder: &dyn crate::builder::DirProviderBuilder<R>,
         dirmgr_extensions: tor_dirmgr::config::DirMgrExtensions,
@@ -471,7 +521,7 @@ impl<R: Runtime> TorClient<R> {
             dormant.into(),
             &NetParameters::from_map(&config.override_net_params),
         ));
-        let guardmgr = tor_guardmgr::GuardMgr::new(runtime.clone(), statemgr.clone(), &config)
+        let guardmgr = tor_guardmgr::GuardMgr::new(runtime.clone(), statemgr.clone(), config)
             .map_err(ErrorDetail::GuardMgrSetup)?;
 
         #[cfg(feature = "pt-client")]
@@ -492,7 +542,7 @@ impl<R: Runtime> TorClient<R> {
         };
 
         let circmgr = tor_circmgr::CircMgr::new(
-            &config,
+            config,
             statemgr.clone(),
             &runtime,
             Arc::clone(&chanmgr),
@@ -500,7 +550,7 @@ impl<R: Runtime> TorClient<R> {
         )
         .map_err(ErrorDetail::CircMgrSetup)?;
 
-        let timeout_cfg = config.stream_timeouts;
+        let timeout_cfg = config.stream_timeouts.clone();
 
         let dirmgr_store =
             DirMgrStore::new(&dir_cfg, runtime.clone(), false).map_err(ErrorDetail::DirMgrSetup)?;
@@ -530,7 +580,7 @@ impl<R: Runtime> TorClient<R> {
         #[cfg(feature = "bridge-client")]
         let bridge_desc_mgr = Arc::new(Mutex::new(None));
 
-        #[cfg(feature = "onion-client")]
+        #[cfg(feature = "onion-service-client")]
         let hsclient = {
             let circpool = HsCircPool::new(&circmgr);
 
@@ -538,7 +588,36 @@ impl<R: Runtime> TorClient<R> {
                 .launch_background_tasks(&runtime, &dirmgr.clone().upcast_arc())
                 .map_err(ErrorDetail::CircMgrSetup)?;
 
-            HsClientConnector::new(runtime.clone(), circpool)?
+            // Prompt the hs connector to do its data housekeeping when we get a new consensus.
+            // That's a time we're doing a bunch of thinking anyway, and it's not very frequent.
+            let housekeeping = dirmgr.events().filter_map(|event| async move {
+                match event {
+                    DirEvent::NewConsensus => Some(()),
+                    _ => None,
+                }
+            });
+            let housekeeping = Box::pin(housekeeping);
+
+            HsClientConnector::new(runtime.clone(), circpool, config, housekeeping)?
+        };
+
+        let keymgr = {
+            let key_store_dir = config.storage.expand_keystore_dir()?;
+            let permissions = config.storage.permissions();
+
+            let mut stores: Vec<Box<dyn Keystore>> = vec![];
+
+            // TODO hs: For now, let's ignore any errors coming from the ArtiNativeKeystore
+            // constructor. We should remove this when we implement the key store config and bail
+            // if the keystore dir fails the validation checks.
+            if let Some(key_store_dir) = key_store_dir {
+                let arti_store =
+                    ArtiNativeKeystore::from_path_and_mistrust(key_store_dir, permissions)?;
+                stores.push(Box::new(arti_store));
+            }
+
+            // TODO hs: add support for the C Tor key store
+            Arc::new(KeyMgr::new(stores))
         };
 
         runtime
@@ -578,8 +657,9 @@ impl<R: Runtime> TorClient<R> {
             bridge_desc_mgr,
             #[cfg(feature = "pt-client")]
             pt_mgr,
-            #[cfg(feature = "onion-client")]
+            #[cfg(feature = "onion-service-client")]
             hsclient,
+            keymgr,
             guardmgr,
             statemgr,
             addrcfg: Arc::new(addr_cfg.into()),
@@ -828,7 +908,7 @@ impl<R: Runtime> TorClient<R> {
     ///
     /// Hostnames are _strongly_ preferred here: if this function allowed the
     /// caller here to provide an IPAddr or [`IpAddr`] or
-    /// [`SocketAddr`](std::net::SocketAddr) address, then  
+    /// [`SocketAddr`](std::net::SocketAddr) address, then
     ///
     /// ```no_run
     /// # use arti_client::*; use tor_rtcompat::Runtime;
@@ -881,16 +961,14 @@ impl<R: Runtime> TorClient<R> {
     /// Note that because Tor prefers to do DNS resolution on the remote
     /// side of the network, this function takes its address as a string.
     /// (See [`TorClient::connect()`] for more information.)
-    #[allow(clippy::missing_panics_doc)] // TODO HS remove
     pub async fn connect_with_prefs<A: IntoTorAddr>(
         &self,
         target: A,
         prefs: &StreamPrefs,
     ) -> crate::Result<DataStream> {
         let addr = target.into_tor_addr().map_err(wrap_err)?;
-        addr.enforce_config(&self.addrcfg.get())?;
 
-        let (circ, addr, port) = match addr.into_stream_instructions()? {
+        let (circ, addr, port) = match addr.into_stream_instructions(&self.addrcfg.get(), prefs)? {
             StreamInstructions::Exit {
                 hostname: addr,
                 port,
@@ -904,7 +982,7 @@ impl<R: Runtime> TorClient<R> {
                 (circ, addr, port)
             }
 
-            #[cfg(not(feature = "onion-client"))]
+            #[cfg(not(feature = "onion-service-client"))]
             #[allow(unused_variables)] // for hostname and port
             StreamInstructions::Hs {
                 hsid,
@@ -912,8 +990,7 @@ impl<R: Runtime> TorClient<R> {
                 port,
             } => void::unreachable(hsid.0),
 
-            #[cfg(feature = "onion-client")]
-            #[allow(unused_variables)] // TODO HS remove
+            #[cfg(feature = "onion-service-client")]
             StreamInstructions::Hs {
                 hsid,
                 hostname,
@@ -922,12 +999,49 @@ impl<R: Runtime> TorClient<R> {
                 self.wait_for_bootstrap().await?;
                 let netdir = self.netdir(Timeliness::Timely, "connect to a hidden service")?;
 
+                // TODO hs: use a real client id (loaded from the config)
+                let client_id = HsClientSpecifier::new("default".into())
+                    .map_err(|e| ErrorDetail::Keystore(e))?;
+                let desc_enc_key_spec = HsClientSecretKeySpecifier::new(
+                    client_id.clone(),
+                    hsid,
+                    HsClientKeyRole::DescEnc,
+                );
+
+                // TODO hs: refactor to reduce code duplication.
+                //
+                // The code that reads ks_hsc_desc_enc and ks_hsc_intro_auth and builds the
+                // HsClientSecretKeys is very repetitive and should be refactored.
+                let ks_hsc_desc_enc = self
+                    .keymgr
+                    .get::<HsClientDescEncSecretKey>(&desc_enc_key_spec)?;
+
+                let intro_auth_key_spec =
+                    HsClientSecretKeySpecifier::new(client_id, hsid, HsClientKeyRole::IntroAuth);
+
+                let ks_hsc_intro_auth = self
+                    .keymgr
+                    .get::<HsClientIntroAuthKeypair>(&intro_auth_key_spec)?;
+
+                let mut hs_client_secret_keys_builder = HsClientSecretKeysBuilder::default();
+                if let Some(ks_hsc_desc_enc) = ks_hsc_desc_enc {
+                    hs_client_secret_keys_builder.ks_hsc_desc_enc(ks_hsc_desc_enc);
+                }
+
+                if let Some(ks_hsc_intro_auth) = ks_hsc_intro_auth {
+                    hs_client_secret_keys_builder.ks_hsc_intro_auth(ks_hsc_intro_auth);
+                }
+
+                let hs_client_secret_keys = hs_client_secret_keys_builder
+                    .build()
+                    .map_err(ErrorDetail::Configuration)?;
+
                 let circ = self
                     .hsclient
                     .get_or_launch_connection(
                         &netdir,
                         hsid,
-                        HsClientSecretKeys::default(), // TODO HS support client auth somehow
+                        hs_client_secret_keys,
                         self.isolation(prefs),
                     )
                     .await
@@ -992,9 +1106,8 @@ impl<R: Runtime> TorClient<R> {
         // but I see no reason why it shouldn't be?  Then `into_resolve_instructions`
         // should be a method on `Host`, not `TorAddr`.  -Diziet.
         let addr = (hostname, 1).into_tor_addr().map_err(wrap_err)?;
-        addr.enforce_config(&self.addrcfg.get()).map_err(wrap_err)?;
 
-        match addr.into_resolve_instructions()? {
+        match addr.into_resolve_instructions(&self.addrcfg.get(), prefs)? {
             ResolveInstructions::Exit(hostname) => {
                 let circ = self.get_or_launch_exit_circ(&[], prefs).await?;
 
@@ -1049,7 +1162,7 @@ impl<R: Runtime> TorClient<R> {
         Ok(hostnames)
     }
 
-    /// Return a reference to this this client's directory manager.
+    /// Return a reference to this client's directory manager.
     ///
     /// This function is unstable. It is only enabled if the crate was
     /// built with the `experimental-api` feature.
@@ -1058,13 +1171,22 @@ impl<R: Runtime> TorClient<R> {
         &self.dirmgr
     }
 
-    /// Return a reference to this this client's circuit manager.
+    /// Return a reference to this client's circuit manager.
     ///
     /// This function is unstable. It is only enabled if the crate was
     /// built with the `experimental-api` feature.
     #[cfg(feature = "experimental-api")]
     pub fn circmgr(&self) -> &Arc<tor_circmgr::CircMgr<R>> {
         &self.circmgr
+    }
+
+    /// Return a reference to this client's channel manager.
+    ///
+    /// This function is unstable. It is only enabled if the crate was
+    /// built with the `experimental-api` feature.
+    #[cfg(feature = "experimental-api")]
+    pub fn chanmgr(&self) -> &Arc<tor_chanmgr::ChanMgr<R>> {
+        &self.chanmgr
     }
 
     /// Return a reference to the runtime being used by this client.
@@ -1080,7 +1202,8 @@ impl<R: Runtime> TorClient<R> {
 
     /// Return a netdir that is timely according to the rules of `timeliness`.
     ///
-    /// Use `action` to
+    /// The `action` string is a description of what we wanted to do with the
+    /// directory, to be put into the error message if we couldn't find a directory.
     fn netdir(
         &self,
         timeliness: Timeliness,
@@ -1102,7 +1225,7 @@ impl<R: Runtime> TorClient<R> {
         &self,
         exit_ports: &[TargetPort],
         prefs: &StreamPrefs,
-    ) -> StdResult<ClientCirc, ErrorDetail> {
+    ) -> StdResult<Arc<ClientCirc>, ErrorDetail> {
         // TODO HS probably this netdir ought to be made in connect_with_prefs
         // like for StreamInstructions::Hs.
         self.wait_for_bootstrap().await?;

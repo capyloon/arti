@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::task::SpawnError;
 
-#[cfg(feature = "onion-client")]
+#[cfg(feature = "onion-service-client")]
 use safelog::Redacted;
 use safelog::Sensitive;
 use thiserror::Error;
@@ -13,7 +13,7 @@ use tor_circmgr::TargetPorts;
 use tor_error::{ErrorKind, HasKind};
 
 use crate::TorAddrError;
-#[cfg(feature = "onion-client")]
+#[cfg(feature = "onion-service-client")]
 use tor_hscrypto::pk::HsId;
 
 /// Main high-level error type for the Arti Tor client
@@ -111,6 +111,8 @@ pub_if_error_detail! {
 /// different kinds of [`Error`](crate::Error).  If that doesn't provide enough information
 /// for your use case, please let us know.
 #[cfg_attr(docsrs, doc(cfg(feature = "error_detail")))]
+#[cfg_attr(test, derive(strum::EnumDiscriminants))]
+#[cfg_attr(test, strum_discriminants(vis(pub(crate))))]
 #[derive(Error, Clone, Debug)]
 #[non_exhaustive]
 enum ErrorDetail {
@@ -145,7 +147,7 @@ enum ErrorDetail {
 
     /// Error setting up the hidden service client connector.
     #[error("Error setting up the hidden service client connector")]
-    #[cfg(feature = "onion-client")]
+    #[cfg(feature = "onion-service-client")]
     HsClientConnectorSetup(#[from] tor_hsclient::StartupError),
 
     /// Failed to obtain exit circuit
@@ -160,7 +162,7 @@ enum ErrorDetail {
     },
 
     /// Failed to obtain hidden service circuit
-    #[cfg(feature = "onion-client")]
+    #[cfg(feature = "onion-service-client")]
     #[error("Failed to obtain hidden service circuit to {hsid}")]
     ObtainHsCircuit {
         /// The service we were trying to connect to
@@ -194,9 +196,14 @@ enum ErrorDetail {
     #[error("Timed out while waiting for answer from exit")]
     ExitTimeout,
 
-    /// Onion services are supported, but we were asked to connect to one.
-    #[error("Rejecting .onion address as unsupported")]
+    /// Onion services are not compiled in, but we were asked to connect to one.
+    #[error("Rejecting .onion address; feature onion-service-client not compiled in")]
     OnionAddressNotSupported,
+
+    /// Onion services are supported, but we were asked to connect to one.
+    #[cfg(feature = "onion-service-client")]
+    #[error("Rejecting .onion address; connect_to_onion_services disabled in stream preferences")]
+    OnionAddressDisabled,
 
     /// Error when trying to find the IP address of a hidden service
     #[error("A .onion address cannot be resolved to an IP address")]
@@ -265,6 +272,15 @@ enum ErrorDetail {
         action: &'static str,
     },
 
+    /// A key store access failed.
+    #[error("Error while trying to access a key store")]
+    Keystore(#[from] tor_keymgr::Error),
+
+    /// We tried to parse an onion address, but we found that it was invalid.
+    #[cfg(feature = "onion-service-client")]
+    #[error("Invalid onion address")]
+    BadOnionAddress(#[from] tor_hscrypto::pk::HsIdParseError),
+
     /// A programming problem, either in our code or the code calling it.
     #[error("Programming problem")]
     Bug(#[from] tor_error::Bug),
@@ -329,7 +345,7 @@ impl tor_error::HasKind for ErrorDetail {
         use ErrorKind as EK;
         match self {
             E::ObtainExitCircuit { cause, .. } => cause.kind(),
-            #[cfg(feature = "onion-client")]
+            #[cfg(feature = "onion-service-client")]
             E::ObtainHsCircuit { cause, .. } => cause.kind(),
             E::ExitTimeout => EK::RemoteNetworkTimeout,
             E::BootstrapRequired { .. } => EK::BootstrapRequired,
@@ -339,7 +355,7 @@ impl tor_error::HasKind for ErrorDetail {
             E::CircMgrSetup(e) => e.kind(),
             E::DirMgrSetup(e) => e.kind(),
             E::StateMgrSetup(e) => e.kind(),
-            #[cfg(feature = "onion-client")]
+            #[cfg(feature = "onion-service-client")]
             E::HsClientConnectorSetup(e) => e.kind(),
             E::DirMgrBootstrap(e) => e.kind(),
             #[cfg(feature = "pt-client")]
@@ -349,13 +365,18 @@ impl tor_error::HasKind for ErrorDetail {
             E::Configuration(e) => e.kind(),
             E::Reconfigure(e) => e.kind(),
             E::Spawn { cause, .. } => cause.kind(),
-            E::OnionAddressNotSupported => EK::NotImplemented,
+            E::OnionAddressNotSupported => EK::FeatureDisabled,
             E::OnionAddressResolveRequest => EK::NotImplemented,
+            #[cfg(feature = "onion-service-client")]
+            E::OnionAddressDisabled => EK::ForbiddenStreamTarget,
+            #[cfg(feature = "onion-service-client")]
+            E::BadOnionAddress(e) => e.kind(),
             // TODO Should delegate to TorAddrError EK
             E::Address(_) | E::InvalidHostname => EK::InvalidStreamTarget,
             E::LocalAddress => EK::ForbiddenStreamTarget,
             E::ChanMgrSetup(e) => e.kind(),
             E::NoDir { error, .. } => error.kind(),
+            E::Keystore(e) => e.kind(),
             E::FsMistrust(_) => EK::FsPermissions,
             E::Bug(e) => e.kind(),
         }
@@ -368,6 +389,12 @@ impl From<TorAddrError> for Error {
     }
 }
 
+impl From<tor_keymgr::Error> for Error {
+    fn from(e: tor_keymgr::Error) -> Error {
+        ErrorDetail::Keystore(e).into()
+    }
+}
+
 impl From<TorAddrError> for ErrorDetail {
     fn from(e: TorAddrError) -> ErrorDetail {
         use ErrorDetail as E;
@@ -375,17 +402,7 @@ impl From<TorAddrError> for ErrorDetail {
         match e {
             TAE::InvalidHostname => E::InvalidHostname,
             TAE::NoPort | TAE::BadPort => E::Address(e),
-            #[cfg(feature = "onion-client")]
-            TAE::BadOnion => E::Address(e),
         }
-    }
-}
-
-#[cfg(feature = "onion-client")]
-impl From<tor_hscrypto::pk::HsIdParseError> for ErrorDetail {
-    // TODO HS throwing away the original error is not nice, see comment near BadOnion
-    fn from(_e: tor_hscrypto::pk::HsIdParseError) -> ErrorDetail {
-        TorAddrError::BadOnion.into()
     }
 }
 

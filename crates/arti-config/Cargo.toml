@@ -1,9 +1,9 @@
 [package]
 name = "arti-config"
-version = "0.5.1"
+version = "0.6.2"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.65"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
 description = "Removed crate.  (Tools for configuration management in Arti)"
@@ -14,3 +14,8 @@ publish = false
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+
+[features]
+full = []

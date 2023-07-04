@@ -146,7 +146,7 @@ impl HsDescOuter {
     ///
     /// The reader must contain a single HsDescOuter; we return an error if not.
     fn take_from_reader(reader: &mut NetDocReader<'_, HsOuterKwd>) -> Result<UncheckedHsDescOuter> {
-        use crate::err::ParseErrorKind as EK;
+        use crate::err::NetdocErrorKind as EK;
         use HsOuterKwd::*;
 
         let s = reader.str();
@@ -222,7 +222,7 @@ impl HsDescOuter {
                 .parse_obj::<UnvalidatedEdCert>("ED25519 CERT")?
                 .check_cert_type(tor_cert::CertType::HS_BLINDED_ID_V_SIGNING)?
                 .into_unchecked()
-                .check_key(None) // require that the cert contains its signing key.
+                .should_have_signing_key()
                 .map_err(|err| {
                     EK::BadObjectVal
                         .err()
@@ -297,7 +297,7 @@ mod test {
     #![allow(clippy::unchecked_duration_subtraction)]
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
     use super::*;
-    use crate::doc::hsdesc::test::{TEST_DATA, TEST_SUBCREDENTIAL};
+    use crate::doc::hsdesc::test_data::{TEST_DATA, TEST_SUBCREDENTIAL};
     use tor_checkable::SelfSigned;
 
     #[test]
@@ -309,8 +309,12 @@ mod test {
             .check_valid_at(&humantime::parse_rfc3339("2023-01-23T15:00:00Z").unwrap())
             .unwrap();
 
-        // TODO HS: Add checks for the specific fields here once I'm more
-        // confident that this is the example descriptor I'm using.
+        assert_eq!(desc.lifetime.as_minutes(), 180);
+        assert_eq!(desc.revision_counter(), 19655750.into());
+        assert_eq!(
+            desc.desc_sign_key_id().to_string(),
+            "CtiubqLBP1MCviR9SxAW9brjMKSguQFE/vHku3kE4Xo"
+        );
 
         let subcred: tor_hscrypto::Subcredential = TEST_SUBCREDENTIAL.into();
         let inner = desc.decrypt_body(&subcred).unwrap();
